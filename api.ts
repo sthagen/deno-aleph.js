@@ -1,8 +1,9 @@
 import { compress as brotli } from 'https://deno.land/x/brotli@v0.1.4/mod.ts'
 import { gzipEncode } from 'https://deno.land/x/wasm_gzip@v1.0.0/mod.ts'
 import log from './log.ts'
+import { multiParser } from './multiparser.ts'
 import { ServerRequest } from './std.ts'
-import type { APIRequest } from './types.ts'
+import type { APIRequest, FormDataBody } from './types.ts'
 
 export class Request extends ServerRequest implements APIRequest {
     #pathname: string
@@ -82,6 +83,30 @@ export class Request extends ServerRequest implements APIRequest {
 
     async json(data: any, replacer?: (this: any, key: string, value: any) => any, space?: string | number): Promise<void> {
         await this.send(JSON.stringify(data, replacer, space), 'application/json; charset=utf-8')
+    }
+
+    async decodeBody(type: "text"): Promise<string>
+    async decodeBody(type: "json"): Promise<any>
+    async decodeBody(type: "form-data"): Promise<FormDataBody>
+    async decodeBody(type: string): Promise<any> {
+        if (type === "text") {
+            const buff: Uint8Array = await Deno.readAll(this.body);
+            const encoded = new TextDecoder("utf-8").decode(buff);
+            return encoded;
+        }
+
+        if (type === "json") {
+            const buff: Uint8Array = await Deno.readAll(this.body);
+            const encoded = new TextDecoder("utf-8").decode(buff);
+            const json = JSON.parse(encoded);
+            return json;
+        }
+
+        if (type === "form-data") {
+            const contentType = this.headers.get("content-type") as string
+            const form = await multiParser(this.body, contentType);
+            return form;
+        }
     }
 
     async send(data: string | Uint8Array | ArrayBuffer, contentType?: string): Promise<void> {
