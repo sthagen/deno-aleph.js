@@ -1,13 +1,11 @@
-import React, { ComponentType } from 'https://esm.sh/react'
-import { Head } from 'https://deno.land/x/aleph/mod.ts'
+import type { ComponentType } from 'react'
+import React from 'react'
 
 export default function App({ Page, pageProps }: { Page: ComponentType<any>, pageProps: any }) {
     return (
-        <>
-            <Head>
-                <title>Hello World - Aleph.js</title>
-            </Head>
+        <main>
+            <link rel="stylesheet" href="./style/app.css" />
             <Page {...pageProps} />
-        </>
+        </main>
     )
 }

@@ -1,22 +1,27 @@
 # Contributing to Aleph.js
 
-Welcome, and thank you for taking time in contributing to Aleph.js!
+Welcome, and thank you for taking time in contributing to Aleph.js! You can improve Aleph.js in different ways:
 
-## Code of Conduct
-
-All contributors are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+- ∆ add new features
+- ✘ bugfix
+- ✔︎ review code
+- ☇ write plugins
+- 𝔸 improve our [documentation](https://github.com/alephjs/alephjs.org)
 
 ## Development Setup
 
-You will need [Deno](https://deno.land/) 1.5+ and [VS Code](https://code.visualstudio.com/) with [deno extension](https://marketplace.visualstudio.com/items?itemName=denoland.vscode-deno).
+You will need [Deno](https://deno.land/) 1.7+.
 
 1. Fork this repository to your own GitHub account.
 2. Clone the repository to your local device.
 3. Create a new branch `git checkout -b BRANCH_NAME`.
-4. Change code then run examples.
+4. Change code then run our examples.
 
 ```bash
-deno run -A --unstable --import-map=import_map.json cli.ts ./examples/hello-world -L debug
+# ssr
+deno run -A --unstable --import-map=import_map.json --location=http://localhost cli.ts dev ./examples/hello-world -L debug
+# ssg
+deno run -A --unstable --import-map=import_map.json --location=http://localhost cli.ts build ./examples/hello-world -L debug
 ```
 
 ## Testing
@@ -24,9 +29,23 @@ deno run -A --unstable --import-map=import_map.json cli.ts ./examples/hello-worl
 Run all tests:
 
 ```bash
-deno test -A --unstable
+deno test -A --location=http://localhost
 ```
 
-## Contributing to Documentation
+## Project Structure
 
-You are welcome to improve our [documentation](https://alephjs.org/docs).
+- **/cli** commands code
+- **/compiler** compiler in rust powered by swc
+- **/framework**
+  - **core** framework core
+  - **react** react framework code
+- **/design** design drawings and assets
+- **/examples** examples
+- **/plugins** official plugins
+- **/server** server code
+- **/shared** shared code
+- **/test** testings
+
+## Code of Conduct
+
+All contributors are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
