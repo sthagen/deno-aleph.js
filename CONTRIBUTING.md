@@ -16,24 +16,24 @@ You will need [Deno](https://deno.land/) 1.7+.
 2. Clone the repository to your local device.
 3. Create a new branch `git checkout -b BRANCH_NAME`.
 4. Change code then run our examples.
-5. Push your changes to Github.
+5. Push your branch to Github after all tests passed.
 6. Make a [pull request](https://github.com/alephjs/aleph.js/pulls).
-8. Marge to master branch.
+7. Marge to master branch by our maintainers.
 
 ```bash
-# ssr/development
-deno run -A --unstable --import-map=import_map.json cli.ts dev ./examples/hello-world -L debug
+# set dev env
+echo 'ALEPH_DEV_PORT=2021' > .local.env
+
+# ssr/development with HMR
+deno run -A cli.ts dev ./examples/hello-world -L debug
+
 # ssr/production
-deno run -A --unstable --import-map=import_map.json cli.ts build ./examples/hello-world -L debug
+deno run -A cli.ts start ./examples/hello-world -L debug
+
 # ssg
-deno run -A --unstable --import-map=import_map.json cli.ts build ./examples/hello-world -L debug
-```
+deno run -A cli.ts build ./examples/hello-world -L debug
 
-## Testing
-
-Run all tests:
-
-```bash
+# run all tests
 deno test -A --location=http://localhost
 ```
 
@@ -43,7 +43,7 @@ deno test -A --location=http://localhost
 - **/compiler** compiler in rust powered by swc
 - **/framework**
   - **core** framework core code
-  - **react** framework react code
+  - **react** framework in React
 - **/design** design drawings and assets
 - **/examples** examples
 - **/plugins** official plugins

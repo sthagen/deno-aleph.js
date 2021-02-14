@@ -1,6 +1,5 @@
 // Copyright 2020-2021 postUI Lab. All rights reserved. MIT license.
 
-use crate::aleph::VERSION;
 use crate::import_map::{ImportHashMap, ImportMap};
 
 use indexmap::IndexSet;
@@ -54,11 +53,11 @@ pub struct InlineStyle {
 
 /// A Resolver to resolve aleph.js import/export URL.
 pub struct Resolver {
-  /// The text specifier associated with the import/export statement.
+  /// the text specifier associated with the import/export statement.
   pub specifier: String,
-  /// A flag indicating if the specifier is remote url or not.
+  /// a flag indicating if the specifier is remote url or not.
   pub specifier_is_remote: bool,
-  ///  builtin jsx tags like `a`, `link`, `head`, etc
+  /// builtin jsx tags like `a`, `link`, `head`, etc
   pub used_builtin_jsx_tags: IndexSet<String>,
   /// dependency graph
   pub dep_graph: Vec<DependencyDescriptor>,
@@ -68,7 +67,10 @@ pub struct Resolver {
   pub bundle_mode: bool,
   /// bundled modules
   pub bundled_modules: IndexSet<String>,
+
+  // private
   import_map: ImportMap,
+  aleph_module_url: Option<String>,
   react_version: Option<String>,
 }
 
@@ -76,6 +78,7 @@ impl Resolver {
   pub fn new(
     specifier: &str,
     import_map: ImportHashMap,
+    aleph_module_url: Option<String>,
     react_version: Option<String>,
     bundle_mode: bool,
     bundled_modules: Vec<String>,
@@ -91,10 +94,18 @@ impl Resolver {
       dep_graph: Vec::new(),
       inline_styles: HashMap::new(),
       import_map: ImportMap::from_hashmap(import_map),
+      aleph_module_url,
       react_version,
       bundle_mode,
       bundled_modules: set,
     }
+  }
+
+  pub fn get_aleph_module_url(&self) -> String {
+    if let Some(aleph_module_url) = &self.aleph_module_url {
+      return aleph_module_url.into();
+    }
+    "https://deno.land/x/aleph".into()
   }
 
   /// fix import/export url.
@@ -231,12 +242,14 @@ impl Resolver {
       }
     };
     // fix deno.land/x/aleph url
-    if fixed_url.starts_with("https://deno.land/x/aleph/") {
-      fixed_url = format!(
-        "https://deno.land/x/aleph@v{}/{}",
-        VERSION.as_str(),
-        fixed_url.trim_start_matches("https://deno.land/x/aleph/")
-      );
+    if let Some(aleph_module_url) = &self.aleph_module_url {
+      if fixed_url.starts_with("https://deno.land/x/aleph/") {
+        fixed_url = format!(
+          "{}/{}",
+          aleph_module_url.as_str(),
+          fixed_url.trim_start_matches("https://deno.land/x/aleph/")
+        );
+      }
     }
     // fix react/react-dom url
     if let Some(version) = &self.react_version {
@@ -391,10 +404,10 @@ impl AlephResolveFold {
     hasher.update(callback_code.clone());
     ident.push_str(
       base64::encode(hasher.finalize())
-        .replace("/", "")
         .replace("+", "")
-        .as_str()
-        .trim_end_matches('='),
+        .replace("/", "")
+        .replace("=", "")
+        .as_str(),
     );
     ident
   }
@@ -800,7 +813,14 @@ mod tests {
 
   #[test]
   fn test_resolver_fix_import_url() {
-    let resolver = Resolver::new("/app.tsx", ImportHashMap::default(), None, false, vec![]);
+    let resolver = Resolver::new(
+      "/app.tsx",
+      ImportHashMap::default(),
+      None,
+      None,
+      false,
+      vec![],
+    );
     assert_eq!(
       resolver.fix_import_url("https://esm.sh/react"),
       "/-/esm.sh/react.js"
@@ -843,11 +863,13 @@ mod tests {
   #[test]
   fn test_resolve_local() {
     let mut imports: HashMap<String, String> = HashMap::new();
+    imports.insert("@/".into(), "./".into());
+    imports.insert("~/".into(), "./".into());
     imports.insert("react".into(), "https://esm.sh/react".into());
     imports.insert("react-dom/".into(), "https://esm.sh/react-dom/".into());
     imports.insert(
       "https://deno.land/x/aleph/".into(),
-      "http://localhost:9006/".into(),
+      "http://localhost:2020/".into(),
     );
     let mut resolver = Resolver::new(
       "/pages/index.tsx",
@@ -855,6 +877,7 @@ mod tests {
         imports,
         scopes: HashMap::new(),
       },
+      None,
       Some("17.0.1".into()),
       false,
       vec![],
@@ -880,8 +903,8 @@ mod tests {
         None
       ),
       (
-        "../-/http_localhost_9006/framework/react/link.js".into(),
-        "http://localhost:9006/framework/react/link.ts".into()
+        "../-/http_localhost_2020/framework/react/link.js".into(),
+        "http://localhost:2020/framework/react/link.ts".into()
       )
     );
     assert_eq!(
@@ -936,8 +959,8 @@ mod tests {
     assert_eq!(
       resolver.resolve("https://deno.land/x/aleph/mod.ts", false, None),
       (
-        "../-/http_localhost_9006/mod.js".into(),
-        "http://localhost:9006/mod.ts".into()
+        "../-/http_localhost_2020/mod.js".into(),
+        "http://localhost:2020/mod.ts".into()
       )
     );
     assert_eq!(
@@ -975,6 +998,7 @@ mod tests {
     let mut resolver = Resolver::new(
       "https://esm.sh/react-dom",
       ImportHashMap::default(),
+      None,
       Some("17.0.1".into()),
       false,
       vec![],
@@ -1011,6 +1035,7 @@ mod tests {
     let mut resolver = Resolver::new(
       "https://esm.sh/preact/hooks",
       ImportHashMap::default(),
+      None,
       None,
       false,
       vec![],

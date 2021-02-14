@@ -1,6 +1,6 @@
 import util from '../../shared/util.ts'
 
-export const serverStyles: Map<string, string> = new Map()
+export const serverStyles = new Map<string, string>()
 
 export function removeCSS(id: string) {
   const { document } = window as any
@@ -33,7 +33,6 @@ export function applyCSS(id: string, css: string) {
       if (prevStyleEls.length > 0) {
         prevStyleEls.forEach(el => document.head.removeChild(el))
       }
-      return styleEl
     }
   }
 }

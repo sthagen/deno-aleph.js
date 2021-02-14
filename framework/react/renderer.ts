@@ -2,31 +2,38 @@ import type { ComponentType, ReactElement } from 'https://esm.sh/react'
 import { createElement } from 'https://esm.sh/react'
 import { renderToString } from 'https://esm.sh/react-dom/server'
 import util from '../../shared/util.ts'
-import type { RenderResult, RouterURL } from '../../types.ts'
+import type { RouterURL } from '../../types.ts'
 import events from '../core/events.ts'
 import { serverStyles } from "../core/style.ts"
-import { RendererContext, RouterContext } from './context.ts'
+import { RouterContext, SSRContext } from './context.ts'
 import { AsyncUseDenoError, E400MissingComponent, E404Page } from './error.ts'
+import { isLikelyReactComponent } from './helper.ts'
 import { createPageProps } from './pageprops.ts'
-import { isLikelyReactComponent } from './util.ts'
+
+type RenderResult = {
+  head: string[]
+  body: string
+  scripts: Record<string, any>[]
+  data: Record<string, string> | null
+}
 
 export async function render(
   url: RouterURL,
   App: ComponentType<any> | undefined,
   E404: ComponentType | undefined,
-  pageComponentChain: { url: string, Component?: any }[],
-  styles?: { url: string, hash: string }[]
-) {
+  pageComponentChain: { url: string, Component?: any }[]
+): Promise<RenderResult> {
   const global = globalThis as any
-  const ret: Omit<RenderResult, 'url' | 'status'> = {
+  const ret: RenderResult = {
     head: [],
     body: '',
     scripts: [],
     data: null,
   }
-  const headElements = new Map()
-  const scriptsElements = new Map()
   const buildMode = Deno.env.get('BUILD_MODE')
+  const styleLinks: Map<string, { module: string }> = new Map()
+  const headElements: Map<string, { type: string, props: Record<string, any> }> = new Map()
+  const scriptElements: Map<string, { props: Record<string, any> }> = new Map()
   const dataUrl = 'data://' + url.pathname
   const asyncCalls: Array<Promise<any>> = []
   const data: Record<string, any> = {}
@@ -78,8 +85,8 @@ export async function render(
         await Promise.all(asyncCalls.splice(0, asyncCalls.length))
       }
       ret.body = renderToString(createElement(
-        RendererContext.Provider,
-        { value: { headElements, scriptsElements } },
+        SSRContext.Provider,
+        { value: { styleLinks, headElements, scriptElements } },
         createElement(
           RouterContext.Provider,
           { value: url },
@@ -122,10 +129,9 @@ export async function render(
       }
     }
   })
-  headElements.clear()
 
   // get script tags
-  scriptsElements.forEach(({ props }) => {
+  scriptElements.forEach(({ props }) => {
     const { children, dangerouslySetInnerHTML, ...attrs } = props
     if (dangerouslySetInnerHTML && util.isNEString(dangerouslySetInnerHTML.__html)) {
       ret.scripts.push({ ...attrs, innerText: dangerouslySetInnerHTML.__html })
@@ -137,19 +143,13 @@ export async function render(
       ret.scripts.push(props)
     }
   })
-  scriptsElements.clear()
 
-  // get inline-styles
-  const rets = await Promise.all(styles?.filter(({ url }) => !url.startsWith('#inline-style-')).map(({ url, hash }) => {
-    const path = util.isLikelyHttpURL(url) ? '/-/' + url.split('://')[1] : `${url}.${util.shortHash(hash)}`
-    return import('file://' + util.cleanPath(`${Deno.cwd()}/.aleph/${buildMode}/${path}.js`))
-  }) || [])
-  rets.forEach(({ default: def }) => util.isFunction(def) && def())
-  styles?.forEach(({ url }) => {
-    if (serverStyles.has(url)) {
-      const css = serverStyles.get(url)!
-      ret.head.push(`<style type="text/css" data-module-id=${JSON.stringify(url)} ssr>${css}</style>`)
-    }
+  // get styles
+  await Promise.all(Array.from(styleLinks.values()).map(async ({ module }) => {
+    await import('file://' + util.cleanPath(`${Deno.cwd()}/.aleph/${buildMode}/${module}`))
+  }))
+  serverStyles.forEach((css, url) => {
+    ret.head.push(`<style type="text/css" data-module-id=${JSON.stringify(url)} ssr>${css}</style>`)
   })
 
   defer()

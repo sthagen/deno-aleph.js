@@ -1,4 +1,4 @@
-import { colors, path, Sha1 } from '../deps.ts'
+import { colors, createHash, path } from '../deps.ts'
 import { existsDirSync } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
@@ -9,6 +9,26 @@ export const reLocaleID = /^[a-z]{2}(-[a-zA-Z0-9]+)?$/
 export const reFullVersion = /@v?\d+\.\d+\.\d+/i
 export const reHashJs = /\.[0-9a-fx]{9}\.js$/i
 export const reHashResolve = /(import|import\s*\(|from|href\s*:)(\s*)("|')([^'"]+\.[0-9a-fx]{9}\.js)("|')/g
+
+// inject browser navigator polyfill
+Object.assign(globalThis, {
+  navigator: {
+    connection: {
+      downlink: 10,
+      effectiveType: "4g",
+      onchange: null,
+      rtt: 50,
+      saveData: false,
+    },
+    cookieEnabled: false,
+    deviceMemory: 8,
+    hardwareConcurrency: 4,
+    language: 'en',
+    onLine: true,
+    userAgent: `Deno/${Deno.version.deno}`,
+    vendor: 'Deno Land',
+  }
+})
 
 export const AlephRuntimeCode = `
   var __ALEPH = window.__ALEPH || (window.__ALEPH = {
@@ -41,14 +61,13 @@ export const AlephRuntimeCode = `
   });
 `
 
-/** get aleph pkg url. */
-export function getAlephPkgUrl() {
-  let url = `https://deno.land/x/aleph@v${VERSION}`
-  const { __ALEPH_DEV_PORT: devPort } = globalThis as any
-  if (devPort) {
-    url = `http://localhost:${devPort}`
+/** get aleph module url. */
+export function getAlephModuleUrl() {
+  const DEV_PORT = Deno.env.get('ALEPH_DEV_PORT')
+  if (DEV_PORT) {
+    return `http://localhost:${DEV_PORT}`
   }
-  return url
+  return `https://deno.land/x/aleph@v${VERSION}`
 }
 
 /** get relative the path of `to` to `from`. */
@@ -62,11 +81,11 @@ export function getRelativePath(from: string, to: string): string {
 
 /** compute hash of the content */
 export function computeHash(content: string | Uint8Array): string {
-  return (new Sha1).update(content).hex()
+  return createHash('sha1').update(content).toString()
 }
 
-/** cleanup the previous compilation cache */
-export async function cleanupCompilation(jsFile: string) {
+/** clear the previous compilation cache */
+export async function clearCompilation(jsFile: string) {
   const dir = path.dirname(jsFile)
   const jsFileName = path.basename(jsFile)
   if (!reHashJs.test(jsFile) || !existsDirSync(dir)) {
@@ -83,40 +102,25 @@ export async function cleanupCompilation(jsFile: string) {
   }
 }
 
-/** fix import map */
-export function fixImportMap(v: any) {
-  const imports: Record<string, string> = {}
-  if (util.isPlainObject(v)) {
-    Object.entries(v).forEach(([key, value]) => {
-      if (key == '' || key == '/') {
-        return
-      }
-      const isPrefix = key.endsWith('/')
-      const y = (v: string) => util.isNEString(v) && (!isPrefix || v.endsWith('/'))
-      if (y(value)) {
-        imports[key] = value
-        return
-      } else if (util.isNEArray(value)) {
-        for (const v of value) {
-          if (y(v)) {
-            imports[key] = v
-            return
-          }
-        }
-      }
-    })
-  }
-  return imports
-}
-
 /** parse port number */
 export function parsePortNumber(v: string): number {
   const num = parseInt(v)
-  if (isNaN(num) || num <= 0 || num > 1 << 16 || !Number.isInteger(num)) {
-    log.error(`invalid port 'v'`)
-    Deno.exit(1)
+  if (isNaN(num) || !Number.isInteger(num) || num <= 0 || num >= 1 << 16) {
+    log.fatal(`invalid port '${v}'`)
   }
   return num
+}
+
+/** get flag */
+export function getFlag(flags: Record<string, string | boolean>, keys: string[], defaultValue?: string): string {
+  let value = defaultValue || ''
+  for (const key of keys) {
+    if (key in flags && util.isNEString(flags[key])) {
+      value = String(flags[key])
+      break
+    }
+  }
+  return value
 }
 
 /**

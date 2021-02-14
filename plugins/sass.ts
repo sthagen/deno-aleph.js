@@ -1,31 +1,23 @@
 import { Options, renderSync } from 'https://esm.sh/sass@1.32.5'
 import type { LoaderPlugin } from '../types.ts'
 
-const pluginFactory = (opts: Options = {}): LoaderPlugin => ({
+export default (opts?: Options): LoaderPlugin => ({
+  name: 'sass-loader',
   type: 'loader',
-  test: /.(sass|scss)$/,
+  test: /\.(sass|scss)$/i,
   acceptHMR: true,
-  transform(content: Uint8Array, path: string) {
-    const ret = renderSync({
-      indentedSyntax: path.endsWith('.sass'),
+  async transform({ content, url, bundleMode }) {
+    const { css, map } = renderSync({
+      indentedSyntax: url.endsWith('.sass'),
       ...opts,
-      file: path,
+      file: url,
       data: (new TextDecoder).decode(content),
       sourceMap: true
     })
     return {
-      code: (new TextDecoder).decode(ret.css),
-      map: ret.map ? (new TextDecoder).decode(ret.map) : undefined,
-      format: 'css',
+      code: (new TextDecoder).decode(css),
+      map: map ? (new TextDecoder).decode(map) : undefined,
+      loader: 'css-loader'
     }
   }
 })
-
-// make the `pluginFactory` function as a plugin
-const defaultPlugin = pluginFactory()
-pluginFactory.type = defaultPlugin.type
-pluginFactory.test = defaultPlugin.test
-pluginFactory.acceptHMR = defaultPlugin.acceptHMR
-pluginFactory.transform = defaultPlugin.transform
-
-export default pluginFactory

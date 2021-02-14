@@ -1,32 +1,40 @@
-import type { AcceptedPlugin, bufio } from './deps.ts'
+import type { BufReader, BufWriter, MultipartFormData } from './deps.ts'
 
 /**
- * The transform result of compiler.
+ * The result of loader transform.
  */
-export type TransformResult = {
+export type LoaderTransformResult = {
   code: string,
-  map?: string,
-  format?: 'js' | 'ts' | 'jsx' | 'tsx' | 'css',
+  map?: string
+  loader?: string
 }
 
 /**
  * A loader plugin to load source media.
  */
 export type LoaderPlugin = {
+  /** `name` gives the plugin a name. */
+  name: string
   /** `type` specifies the plugin type. */
   type: 'loader'
   /** `test` matches the import url. */
   test: RegExp
   /** `acceptHMR` enables the HMR. */
   acceptHMR?: boolean
+  /** `allowPage` allows the loaded module as a page. */
+  allowPage?: boolean
+  /** `init` initiates the plugin. */
+  init?(): Promise<void>
   /** `transform` transforms the source content. */
-  transform(content: Uint8Array, url: string): TransformResult | Promise<TransformResult>
+  transform(source: { url: string, content: Uint8Array, map?: string, bundleMode?: boolean }): LoaderTransformResult | Promise<LoaderTransformResult>
 }
 
 /**
  * A server plugin to enhance the aleph server application.
  */
 export type ServerPlugin = {
+  /** `name` gives the plugin a name. */
+  name: string
   /** `type` specifies the plugin type. */
   type: 'server'
   /** `onInit` adds an `init` event to the server. */
@@ -56,16 +64,16 @@ export type SSROptions = {
 export type Config = {
   /** `framework` to run your application (default is 'react'). */
   framework?: 'react'
+  /** `reactVersion` specifies the **react version** (default is '17.0.1'). */
+  reactVersion?: string
   /** `buildTarget` specifies the build target in production mode (default is **es5** to be compatible with IE11). */
   buildTarget?: 'es5' | 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020'
+  /** `baseUrl` specifies the path prefix for the application (default is '/'). */
+  baseUrl?: string
   /** `srcDir` to put your application source code (default is '/'). */
   srcDir?: string
   /** `outputDir` specifies the output directory for `build` command (default is '**dist**'). */
   outputDir?: string
-  /** `baseUrl` specifies the path prefix for the application (default is '/'). */
-  baseUrl?: string
-  /** `reactVersion` specifies the **react version** (default is '17.0.1'). */
-  reactVersion?: string
   /** `defaultLocale` specifies the default locale of the application (default is '**en**'). */
   defaultLocale?: string
   /** A list of locales. */
@@ -74,9 +82,11 @@ export type Config = {
   ssr?: boolean | SSROptions
   /** A list of plugin. */
   plugins?: Plugin[]
-  /** A list of plugin of PostCSS. */
-  postcss?: { plugins: (string | AcceptedPlugin | [string | ((options: Record<string, any>) => AcceptedPlugin), Record<string, any>])[] }
-  /** `env` appends env variables (use `Deno.env.get(key)` to get an env variable). */
+  /** `headers` appends custom headers for each server request. */
+  headers?: Record<string, string>
+  /* The server path rewrite map. */
+  rewrites?: Record<string, string>
+  /** `env` appends env variables. */
   env?: Record<string, string>
 }
 
@@ -98,8 +108,8 @@ export interface ServerRequest {
   readonly method: string
   readonly headers: Headers
   readonly conn: Deno.Conn
-  readonly r: bufio.BufReader
-  readonly w: bufio.BufWriter
+  readonly r: BufReader
+  readonly w: BufWriter
   readonly body: Deno.Reader
   respond(r: ServerResponse): Promise<void>
 }
@@ -117,12 +127,14 @@ export interface ServerResponse {
  * An interface extends the `ServerRequest` for API requests.
  */
 export interface APIRequest extends ServerRequest {
-  readonly pathname: string
   readonly params: Record<string, string>
   readonly query: URLSearchParams
   readonly cookies: ReadonlyMap<string, string>
-  /** `status` sets response status of the request. */
-  status(code: number): this
+  /** `readBody` reads the body to an object in bytes, string, json, or multipart form data. */
+  readBody(type?: 'raw'): Promise<Uint8Array>
+  readBody(type: 'text'): Promise<string>
+  readBody(type: 'json'): Promise<any>
+  readBody(type: 'form'): Promise<MultipartFormData>
   /**
    * `addHeader` adds a new value onto an existing response header of the request, or
    * adds the header if it does not already exist.
@@ -135,14 +147,12 @@ export interface APIRequest extends ServerRequest {
   setHeader(key: string, value: string): this
   /** `removeHeader` removes the value for an existing response header of the request. */
   removeHeader(key: string): this
+  /** `status` sets response status of the request. */
+  status(code: number): this
   /** `send` replies to the request with any content with type. */
-  send(data: string | Uint8Array | ArrayBuffer, contentType?: string): Promise<void>
+  send(data?: string | Uint8Array | ArrayBuffer, contentType?: string): Promise<void>
   /** `json` replies to the request with a json content. */
   json(data: any): Promise<void>
-  /** `decodeBody` will return a string, form-data, or json object. */
-  decodeBody(type: 'form-data'): Promise<FormDataBody>
-  decodeBody(type: 'text'): Promise<string>
-  decodeBody(type: 'json'): Promise<any>
 }
 
 /**
@@ -163,70 +173,4 @@ export type RouterURL = {
   readonly pagePath: string
   readonly params: Record<string, string>
   readonly query: URLSearchParams
-}
-
-/**
- * A module includes compilation details.
- */
-export type Module = {
-  url: string
-  loader: string
-  sourceHash: string
-  hash: string
-  deps: DependencyDescriptor[]
-  jsFile: string
-  bundlingFile: string
-  error: Error | null
-}
-
-/**
- * The dependency descriptor.
- */
-export type DependencyDescriptor = {
-  url: string
-  hash: string
-  isDynamic?: boolean
-  isStyle?: boolean
-  isData?: boolean
-}
-
-/**
- * The render result of SSR.
- */
-export type RenderResult = {
-  url: RouterURL
-  status: number
-  head: string[]
-  body: string
-  scripts: Record<string, any>[]
-  data: Record<string, string> | null
-}
-
-/**
- * The form data body.
- */
-export type FormDataBody = {
-  fields: Record<string, string>
-  files: FormFile[]
-  get(key: string): string | undefined
-  getFile(key: string): FormFile | undefined
-}
-
-/**
- * The form file.
- */
-export type FormFile = {
-  name: string
-  content: Uint8Array
-  contentType: string
-  filename: string
-  size: number
-}
-
-/**
- * The ES Import maps.
- */
-export type ImportMap = {
-  imports: Record<string, string>,
-  scopes: Record<string, Record<string, string>>
 }

@@ -1,6 +1,6 @@
 import { createContext } from 'https://esm.sh/react'
 import type { RouterURL } from '../../types.ts'
-import { createNamedContext } from './util.ts'
+import { createNamedContext } from './helper.ts'
 
 export const RouterContext = createNamedContext<RouterURL>({
   locale: 'en',
@@ -10,11 +10,14 @@ export const RouterContext = createNamedContext<RouterURL>({
   query: new URLSearchParams(),
 }, 'RouterContext')
 
-type RendererContextProps = {
+type SSRContextProps = {
+  styleLinks: Map<string, { module: string }>
   headElements: Map<string, { type: string, props: Record<string, any> }>
-  scriptsElements: Map<string, { type: string, props: Record<string, any> }>
+  scriptElements: Map<string, { props: Record<string, any> }>
 }
-export const RendererContext = createContext<RendererContextProps>({
+
+export const SSRContext = createContext<SSRContextProps>({
+  styleLinks: new Map(),
   headElements: new Map(),
-  scriptsElements: new Map()
+  scriptElements: new Map()
 })

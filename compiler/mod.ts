@@ -1,9 +1,13 @@
 import { ensureDir, path } from '../deps.ts'
 import { existsFileSync } from '../shared/fs.ts'
-import type { ImportMap } from '../types.ts'
 import { VERSION } from '../version.ts'
 import { checksum } from './dist/wasm-checksum.js'
 import init, { transformSync } from './dist/wasm-pack.js'
+
+export type ImportMap = {
+  imports: Record<string, string>
+  scopes: Record<string, Record<string, string>>
+}
 
 export interface SWCOptions {
   target?: 'es5' | 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020'
@@ -17,16 +21,11 @@ export interface TransformOptions {
   url: string
   importMap?: ImportMap
   reactVersion?: string,
+  alephModuleUrl?: string,
   swcOptions?: SWCOptions
   isDev?: boolean,
   bundleMode?: boolean,
   bundledModules?: string[],
-}
-
-interface DependencyDescriptor {
-  specifier: string,
-  rel?: string
-  isDynamic: boolean,
 }
 
 export interface TransformResult {
@@ -34,6 +33,12 @@ export interface TransformResult {
   deps: DependencyDescriptor[]
   inlineStyles: Record<string, { type: string, quasis: string[], exprs: string[] }>
   map?: string
+}
+
+interface DependencyDescriptor {
+  specifier: string,
+  rel?: string
+  isDynamic: boolean,
 }
 
 /**

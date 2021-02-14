@@ -1,16 +1,18 @@
-import { buildChecksum, initWasm, SWCOptions, TransformOptions, transpileSync } from '../compiler/mod.ts'
-import type { AcceptedPlugin, ECMA } from '../deps.ts'
-import { CleanCSS, colors, ensureDir, minify, path, postcss, Sha256, walk } from '../deps.ts'
+import { buildChecksum, ImportMap, initWasm, SWCOptions, TransformOptions, transpileSync } from '../compiler/mod.ts'
+import type { ECMA } from '../deps.ts'
+import { colors, createHash, ensureDir, minify, path, walk } from '../deps.ts'
 import { EventEmitter } from '../framework/core/events.ts'
 import { isModuleURL, RouteModule, Routing, toPagePath } from '../framework/core/routing.ts'
-import { defaultReactVersion, minDenoVersion, moduleExts } from '../shared/constants.ts'
+import { minDenoVersion, moduleExts } from '../shared/constants.ts'
 import { ensureTextFile, existsDirSync, existsFileSync, lazyRemove } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
-import type { Config, DependencyDescriptor, ImportMap, Module, RenderResult, RouterURL, ServerRequest } from '../types.ts'
+import type { Config, LoaderPlugin, LoaderTransformResult, RouterURL, ServerRequest } from '../types.ts'
 import { VERSION } from '../version.ts'
 import { Request } from './api.ts'
-import { AlephRuntimeCode, cleanupCompilation, computeHash, createHtml, fixImportMap, formatBytesWithColor, getAlephPkgUrl, getRelativePath, reFullVersion, reHashJs, reHashResolve, reLocaleID, respondErrorJSON } from './util.ts'
+import { defaultConfig, loadConfig } from './config.ts'
+import { AlephRuntimeCode, clearCompilation, computeHash, createHtml, formatBytesWithColor, getAlephModuleUrl, getRelativePath, reFullVersion, reHashJs, reHashResolve, respondErrorJSON } from './helper.ts'
+import type { DependencyDescriptor, Module, RenderResult } from './types.ts'
 
 /**
  * The Aleph Server Application class.
@@ -24,487 +26,27 @@ export class Application {
 
   #denoCacheDir = ''
   #modules: Map<string, Module> = new Map()
-  #pageRouting: Routing = new Routing()
-  #apiRouting: Routing = new Routing()
+  #bundlingModules: Map<string, Module> = new Map()
+  #pageRouting: Routing = new Routing({})
+  #apiRouting: Routing = new Routing({})
   #fsWatchListeners: Array<EventEmitter> = []
   #renderer: { render: CallableFunction } = { render: () => { } }
   #renderCache: Map<string, Map<string, RenderResult>> = new Map()
-  #postcssPlugins: Record<string, AcceptedPlugin> = {}
-  #cleanCSS = new CleanCSS({ compatibility: '*' /* Internet Explorer 10+ */ })
   #compilerReady: Promise<void> | boolean = false
-  #postcssReady: Promise<void[]> | boolean = false
   #reloading = false
 
   constructor(workingDir = '.', mode: 'development' | 'production' = 'production', reload = false) {
     this.workingDir = path.resolve(workingDir)
     this.mode = mode
-    this.config = {
-      framework: 'react',
-      srcDir: existsDirSync(path.join(this.workingDir, '/src/pages')) ? '/src' : '/',
-      outputDir: '/dist',
-      baseUrl: '/',
-      defaultLocale: 'en',
-      env: {},
-      locales: [],
-      ssr: {},
-      buildTarget: 'es5',
-      reactVersion: defaultReactVersion,
-      plugins: [],
-      postcss: {
-        plugins: [
-          'autoprefixer'
-        ]
-      }
-    }
+    this.config = { ...defaultConfig }
     this.importMap = { imports: {}, scopes: {} }
     this.ready = this.init(reload)
   }
 
-  get isDev() {
-    return this.mode === 'development'
-  }
-
-  get srcDir() {
-    return path.join(this.workingDir, this.config.srcDir)
-  }
-
-  get outputDir() {
-    return path.join(this.workingDir, this.config.outputDir)
-  }
-
-  get buildDir() {
-    return path.join(this.workingDir, '.aleph', this.mode)
-  }
-
-  isHMRable(url: string) {
-    if (!this.isDev) {
-      return false
-    }
-    if (url.endsWith('.css') || url.endsWith('.pcss')) {
-      return true
-    }
-    for (const ext of ['js', 'ts', 'mjs', 'jsx', 'tsx']) {
-      if (url.endsWith('.' + ext)) {
-        return url.startsWith('/pages/') ||
-          url.startsWith('/components/') ||
-          util.trimModuleExt(url) === '/app' ||
-          util.trimModuleExt(url) === '/404'
-      }
-    }
-    for (const plugin of this.config.plugins) {
-      if (plugin.type === 'loader' && plugin.test.test(url)) {
-        return plugin.acceptHMR
-      }
-    }
-    return false
-  }
-
-  /** create a new module by given url. */
-  private newModule(url: string): Module {
-    const mod = {
-      url,
-      loader: '',
-      sourceHash: '',
-      hash: '',
-      deps: [],
-      jsFile: '',
-      bundlingFile: '',
-      error: null,
-    }
-    const isRemote = util.isLikelyHttpURL(url)
-    const { pathname } = new URL(util.isLikelyHttpURL(url) ? url : 'file://' + url)
-    const ext = path.extname(pathname).slice(1).toLowerCase()
-    if (/[a-z]/.test(ext)) {
-      if (ext === 'css' || ext === 'pcss') {
-        mod.loader = 'css'
-      } else if (moduleExts.includes(ext)) {
-        if (ext === 'mjs') {
-          mod.loader = 'js'
-        } else {
-          mod.loader = ext
-        }
-      } else {
-        for (const plugin of this.config.plugins) {
-          if (plugin.type === 'loader' && plugin.test.test(pathname)) {
-            mod.loader = ext
-            break
-          }
-        }
-      }
-    } else if (isRemote) {
-      mod.loader = 'js'
-    }
-    this.#modules.set(url, mod)
-    return mod
-  }
-
-  /** returns the module by given url. */
-  getModule(url: string): Module | null {
-    if (this.#modules.has(url)) {
-      return this.#modules.get(url)!
-    }
-    return null
-  }
-
-  /** add a new page module by given path and source code. */
-  async addPageModule(pathname: string, code: string): Promise<void> {
-    const url = path.join('/pages/', util.cleanPath(pathname) + '.tsx')
-    const mod = await this.compile(url, { sourceCode: code })
-    this.#pageRouting.update(this.getRouteModule(mod))
-  }
-
-  /** add a new page module by given path and source code. */
-  async removePageModule(pathname: string): Promise<void> {
-    const url = path.join('/pages/', util.cleanPath(pathname) + '.tsx')
-    if (this.#modules.has(url)) {
-      await cleanupCompilation(this.#modules.get(url)!.jsFile)
-      this.#modules.delete(url)
-      this.#pageRouting.removeRoute(url)
-    }
-  }
-
-  createFSWatcher(): EventEmitter {
-    const e = new EventEmitter()
-    this.#fsWatchListeners.push(e)
-    return e
-  }
-
-  removeFSWatcher(e: EventEmitter) {
-    e.removeAllListeners()
-    const index = this.#fsWatchListeners.indexOf(e)
-    if (index > -1) {
-      this.#fsWatchListeners.splice(index, 1)
-    }
-  }
-
-  async handleAPI(req: ServerRequest, loc: { pathname: string, search?: string }) {
-    const [url, chain] = this.#apiRouting.createRouter({
-      ...loc,
-      pathname: decodeURI(loc.pathname)
-    })
-    if (url.pagePath !== '') {
-      const { url: moduleUrl } = chain[chain.length - 1]
-      try {
-        const { default: handle } = await import('file://' + this.#modules.get(moduleUrl)!.jsFile)
-        if (util.isFunction(handle)) {
-          await handle(new Request(req, url.pathname, url.params, url.query))
-        } else {
-          respondErrorJSON(req, 500, 'bad api handler')
-        }
-      } catch (err) {
-        respondErrorJSON(req, 500, err.message)
-        log.error('invoke API:', err)
-      }
-    } else {
-      respondErrorJSON(req, 404, 'not found')
-    }
-  }
-
-  async getSSRData(loc: { pathname: string, search?: string }): Promise<[number, any]> {
-    if (!this.isSSRable(loc.pathname)) {
-      return [404, null]
-    }
-
-    const { status, data } = await this.renderPage(loc)
-    return [status, data]
-  }
-
-  async getPageHtml(loc: { pathname: string, search?: string }): Promise<[number, string, Record<string, string> | null]> {
-    if (!this.isSSRable(loc.pathname)) {
-      const [url] = this.#pageRouting.createRouter(loc)
-      return [url.pagePath === '' ? 404 : 200, await this.getSPAIndexHtml(), null]
-    }
-
-    const { url, status, head, scripts, body, data } = await this.renderPage(loc)
-    const html = createHtml({
-      lang: url.locale,
-      head: head,
-      scripts: [
-        data ? { type: 'application/json', innerText: JSON.stringify(data, undefined, this.isDev ? 4 : 0), id: 'ssr-data' } : '',
-        ...this.getHTMLScripts(),
-        ...scripts
-      ],
-      body,
-      minify: !this.isDev
-    })
-    return [status, html, data]
-  }
-
-  async getSPAIndexHtml() {
-    const { defaultLocale } = this.config
-    const customLoading = await this.renderLoadingPage()
-    const html = createHtml({
-      lang: defaultLocale,
-      scripts: [
-        ...this.getHTMLScripts()
-      ],
-      head: customLoading?.head || [],
-      body: `<div id="__aleph">${customLoading?.body || ''}</div>`,
-      minify: !this.isDev
-    })
-    return html
-  }
-
-  /** build the application to a static site(SSG) */
-  async build() {
-    const start = performance.now()
-    const outputDir = this.outputDir
-    const distDir = path.join(outputDir, '_aleph')
-
-    // wait for project ready
-    await this.ready
-
-    // clean old build
-    if (existsDirSync(outputDir)) {
-      for await (const entry of Deno.readDir(outputDir)) {
-        await Deno.remove(path.join(outputDir, entry.name), { recursive: entry.isDirectory })
-      }
-    }
-
-    // ensure output dir
-    await ensureDir(distDir)
-
-    //  optimizing
-    await this.optimize()
-
-    // ssg
-    await this.ssg()
-
-    // copy bundle dist
-    await this.copyDist()
-
-    // copy public assets
-    const publicDir = path.join(this.workingDir, 'public')
-    if (existsDirSync(publicDir)) {
-      let n = 0
-      for await (const { path: p } of walk(publicDir, { includeDirs: false, skip: [/(^|\/)\.DS_Store$/] })) {
-        const rp = util.trimPrefix(p, publicDir)
-        const fp = path.join(outputDir, rp)
-        const fi = await Deno.lstat(p)
-        await ensureDir(path.dirname(fp))
-        await Deno.copyFile(p, fp)
-        if (n === 0) {
-          log.info(colors.bold('- Public Assets'))
-        }
-        log.info('  ∆', rp.split('\\').join('/'), colors.dim('•'), formatBytesWithColor(fi.size))
-        n++
-      }
-    }
-
-    log.info(`Done in ${Math.round(performance.now() - start)}ms`)
-  }
-
-  /** inject HMR code  */
-  injectHMRCode({ url, loader }: Module, content: string): string {
-    const { __ALEPH_DEV_PORT: devPort } = globalThis as any
-    const alephModuleLocalUrlPreifx = devPort ? `http_localhost_${devPort}` : `deno.land/x/aleph@v${VERSION}`
-    const localUrl = this.fixImportUrl(url)
-    const hmrImportPath = getRelativePath(
-      path.dirname(localUrl),
-      `/-/${alephModuleLocalUrlPreifx}/framework/core/hmr.js`
-    )
-    const lines = [
-      `import { createHotContext } from ${JSON.stringify(hmrImportPath)};`,
-      `import.meta.hot = createHotContext(${JSON.stringify(url)});`
-    ]
-    const reactRefresh = this.config.framework === 'react' && isModuleURL(url)
-    if (reactRefresh) {
-      const refreshImportPath = getRelativePath(
-        path.dirname(localUrl),
-        `/-/${alephModuleLocalUrlPreifx}/framework/react/refresh.js`
-      )
-      lines.push(`import { RefreshRuntime, performReactRefresh } from ${JSON.stringify(refreshImportPath)};`)
-      lines.push('')
-      lines.push(
-        `const prevRefreshReg = window.$RefreshReg$;`,
-        `const prevRefreshSig = window.$RefreshSig$;`,
-        `Object.assign(window, {`,
-        `    $RefreshReg$: (type, id) => RefreshRuntime.register(type, ${JSON.stringify(url)} + " " + id),`,
-        `    $RefreshSig$: RefreshRuntime.createSignatureFunctionForTransform`,
-        `});`,
-      )
-    }
-    lines.push('')
-    lines.push(content)
-    lines.push('')
-    if (reactRefresh) {
-      lines.push(
-        'window.$RefreshReg$ = prevRefreshReg;',
-        'window.$RefreshSig$ = prevRefreshSig;',
-        'import.meta.hot.accept(performReactRefresh);'
-      )
-    } else {
-      if (loader === 'css') {
-        lines.push('__applyCSS();')
-      }
-      lines.push('import.meta.hot.accept();')
-    }
-    return lines.join('\n')
-  }
-
-  private getHTMLScripts() {
-    const { baseUrl } = this.config
-
-    if (this.isDev) {
-      const mainJS = this.getMainJS()
-      return [
-        { src: util.cleanPath(`${baseUrl}/_aleph/main.${util.shortHash(computeHash(mainJS))}.js`), type: 'module' },
-        { src: util.cleanPath(`${baseUrl}/_aleph/-/deno.land/x/aleph/nomodule.js`), nomodule: true },
-      ]
-    }
-
-    const mainJS = this.getMainJS(true)
-    return ['polyfill', 'deps', 'shared'].map(name => {
-      const mod = this.#modules.get(`/${name}.js`)!
-      return { src: util.cleanPath(`${baseUrl}/_aleph/${name}.bundle.${util.shortHash(mod.hash)}.js`) }
-    }).concat([
-      { src: util.cleanPath(`${baseUrl}/_aleph/main.bundle.${util.shortHash(computeHash(mainJS))}.js`) },
-    ])
-  }
-
-  /** load config from `aleph.config.(ts|js|json)` */
-  private async loadConfig() {
-    const config: Record<string, any> = {}
-
-    for (const name of Array.from(['ts', 'js', 'json']).map(ext => 'aleph.config.' + ext)) {
-      const p = path.join(this.workingDir, name)
-      if (existsFileSync(p)) {
-        log.info('Aleph server config loaded from', name)
-        if (name.endsWith('.json')) {
-          const conf = JSON.parse(await Deno.readTextFile(p))
-          if (util.isPlainObject(conf)) {
-            Object.assign(config, conf)
-          }
-        } else {
-          let { default: conf } = await import('file://' + p)
-          if (util.isFunction(conf)) {
-            conf = await conf()
-          }
-          if (util.isPlainObject(conf)) {
-            Object.assign(config, conf)
-          }
-        }
-        break
-      }
-    }
-
-    const {
-      srcDir,
-      ouputDir,
-      baseUrl,
-      buildTarget,
-      sourceMap,
-      defaultLocale,
-      locales,
-      ssr,
-      env,
-      plugins,
-      postcss,
-    } = config
-    if (util.isNEString(srcDir)) {
-      Object.assign(this.config, { srcDir: util.cleanPath(srcDir) })
-    }
-    if (util.isNEString(ouputDir)) {
-      Object.assign(this.config, { ouputDir: util.cleanPath(ouputDir) })
-    }
-    if (util.isNEString(baseUrl)) {
-      Object.assign(this.config, { baseUrl: util.cleanPath(encodeURI(baseUrl)) })
-    }
-    if (/^es(20\d{2}|5)$/i.test(buildTarget)) {
-      Object.assign(this.config, { buildTarget: buildTarget.toLowerCase() })
-    }
-    if (typeof sourceMap === 'boolean') {
-      Object.assign(this.config, { sourceMap })
-    }
-    if (util.isNEString(defaultLocale)) {
-      Object.assign(this.config, { defaultLocale })
-    }
-    if (util.isArray(locales)) {
-      Object.assign(this.config, { locales: Array.from(new Set(locales.filter(l => reLocaleID.test(l)))) })
-      locales.filter(l => !reLocaleID.test(l)).forEach(l => log.warn(`invalid locale ID '${l}'`))
-    }
-    if (typeof ssr === 'boolean') {
-      Object.assign(this.config, { ssr })
-    } else if (util.isPlainObject(ssr)) {
-      const fallback = util.isNEString(ssr.fallback) ? util.ensureExt(ssr.fallback, '.html') : '404.html'
-      const include = util.isArray(ssr.include) ? ssr.include.map(v => util.isNEString(v) ? new RegExp(v) : v).filter(v => v instanceof RegExp) : []
-      const exclude = util.isArray(ssr.exclude) ? ssr.exclude.map(v => util.isNEString(v) ? new RegExp(v) : v).filter(v => v instanceof RegExp) : []
-      const staticPaths = util.isArray(ssr.staticPaths) ? ssr.staticPaths.map(v => util.cleanPath(v.split('?')[0])) : []
-      Object.assign(this.config, { ssr: { fallback, include, exclude, staticPaths } })
-    }
-    if (util.isPlainObject(env)) {
-      Object.assign(this.config, { env })
-    }
-    if (util.isNEArray(plugins)) {
-      Object.assign(this.config, { plugins })
-    }
-    if (util.isPlainObject(postcss) && util.isArray(postcss.plugins)) {
-      Object.assign(this.config, { postcss })
-    } else {
-      for (const name of Array.from(['ts', 'js', 'json']).map(ext => `postcss.config.${ext}`)) {
-        const p = path.join(this.workingDir, name)
-        if (existsFileSync(p)) {
-          if (name.endsWith('.json')) {
-            const postcss = JSON.parse(await Deno.readTextFile(p))
-            if (util.isPlainObject(postcss) && util.isArray(postcss.plugins)) {
-              Object.assign(this.config, { postcss })
-            }
-          } else {
-            let { default: postcss } = await import('file://' + p)
-            if (util.isFunction(postcss)) {
-              postcss = await postcss()
-            }
-            if (util.isPlainObject(postcss) && util.isArray(postcss.plugins)) {
-              Object.assign(this.config, { postcss })
-            }
-          }
-          break
-        }
-      }
-    }
-
-    // todo: load ssr.config.ts
-
-    // load import maps
-    for (const filename of Array.from(['import_map', 'import-map', 'importmap']).map(name => `${name}.json`)) {
-      const importMapFile = path.join(this.workingDir, filename)
-      if (existsFileSync(importMapFile)) {
-        const importMap = JSON.parse(await Deno.readTextFile(importMapFile))
-        const imports: Record<string, string> = fixImportMap(importMap.imports)
-        const scopes: Record<string, Record<string, string>> = {}
-        if (util.isPlainObject(importMap.scopes)) {
-          Object.entries(importMap.scopes).forEach(([key, imports]) => {
-            scopes[key] = fixImportMap(imports)
-          })
-        }
-        Object.assign(this.importMap, { imports, scopes })
-        break
-      }
-    }
-
-    // update import map for alephjs dev env
-    const { __ALEPH_DEV_PORT: devPort } = globalThis as any
-    if (devPort) {
-      const alias = `http://localhost:${devPort}/`
-      const imports = {
-        'https://deno.land/x/aleph/': alias,
-        [`https://deno.land/x/aleph@v${VERSION}/`]: alias,
-        'aleph': `${alias}mod.ts`,
-        'aleph/': alias,
-        'react': `https://esm.sh/react@${this.config.reactVersion}`,
-        'react-dom': `https://esm.sh/react-dom@${this.config.reactVersion}`,
-      }
-      Object.assign(this.importMap.imports, imports)
-    }
-
-    // create page routing
-    this.#pageRouting = new Routing([], this.config.baseUrl, this.config.defaultLocale, this.config.locales)
-  }
-
-  /** initialize project */
+  /** initiate application */
   private async init(reload: boolean) {
     const t = performance.now()
-    const alephPkgUrl = getAlephPkgUrl()
+    const alephModuleUrl = getAlephModuleUrl()
     const { env, framework, plugins, ssr } = this.config
     const walkOptions = { includeDirs: false, exts: moduleExts, skip: [/^\./, /\.d\.ts$/i, /\.(test|spec|e2e)\.m?(j|t)sx?$/i] }
     const apiDir = path.join(this.srcDir, 'api')
@@ -538,9 +80,7 @@ export class Application {
       await ensureDir(this.buildDir)
     }
 
-    await this.loadConfig()
-
-    // change current work dir to appDoot
+    // change current working directory to appDoot
     Deno.chdir(this.workingDir)
 
     // inject env variables
@@ -555,6 +95,20 @@ export class Application {
         $RefreshSig$: () => (type: any) => type,
       })
     }
+
+    const [config, importMap] = await loadConfig(this.workingDir)
+    Object.assign(this.config, config)
+    Object.assign(this.importMap, importMap)
+
+    await Promise.all(this.config.plugins.map(async p => {
+      if (p.type === 'loader' && p.init) {
+        await p.init()
+      }
+      log.debug(`plugin '${p.name}' inited`)
+    }))
+
+    // create page routing
+    this.#pageRouting = new Routing(this.config)
 
     if (!this.isDev) {
       log.info('Building...')
@@ -587,20 +141,20 @@ export class Application {
     }
 
     // pre-compile framework modules
-    await this.compile(`${alephPkgUrl}/framework/${framework}/bootstrap.ts`)
+    await this.compile(`${alephModuleUrl}/framework/${framework}/bootstrap.ts`)
     if (this.isDev) {
       const mods = ['hmr.ts', 'nomodule.ts']
       for (const mod of mods) {
-        await this.compile(`${alephPkgUrl}/framework/core/${mod}`)
+        await this.compile(`${alephModuleUrl}/framework/core/${mod}`)
       }
       if (framework === 'react') {
-        await this.compile(`${alephPkgUrl}/framework/react/refresh.ts`)
+        await this.compile(`${alephModuleUrl}/framework/react/refresh.ts`)
       }
     }
 
     // compile and import framework renderer when ssr is enable
     if (ssr) {
-      const rendererUrl = `${alephPkgUrl}/framework/${framework}/renderer.ts`
+      const rendererUrl = `${alephModuleUrl}/framework/${framework}/renderer.ts`
       await this.compile(rendererUrl)
       const { render } = await import('file://' + this.#modules.get(rendererUrl)!.jsFile)
       this.#renderer = { render }
@@ -685,7 +239,7 @@ export class Application {
                 }
                 if (hmrable) {
                   if (type === 'add') {
-                    this.#fsWatchListeners.forEach(e => e.emit('add', this.getRouteModule(mod)))
+                    this.#fsWatchListeners.forEach(e => e.emit('add', { url: mod.url, hash: mod.hash }))
                   } else {
                     this.#fsWatchListeners.forEach(e => e.emit('modify-' + mod.url, mod.hash))
                   }
@@ -721,21 +275,292 @@ export class Application {
     }
   }
 
+  get isDev() {
+    return this.mode === 'development'
+  }
+
+  get srcDir() {
+    return path.join(this.workingDir, this.config.srcDir)
+  }
+
+  get outputDir() {
+    return path.join(this.workingDir, this.config.outputDir)
+  }
+
+  get buildDir() {
+    return path.join(this.workingDir, '.aleph', this.mode)
+  }
+
+  /** create a new module by given url. */
+  private newModule(url: string, bundleMode = false): Module {
+    const mod: Module = {
+      url,
+      hash: '',
+      sourceHash: '',
+      deps: [],
+      jsFile: '',
+    }
+    if (bundleMode) {
+      this.#bundlingModules.set(url, mod)
+    } else {
+      this.#modules.set(url, mod)
+    }
+    return mod
+  }
+
+  /** returns the module by given url. */
+  getModule(url: string): Module | null {
+    if (this.#modules.has(url)) {
+      return this.#modules.get(url)!
+    }
+    return null
+  }
+
+  /** add a new page module by given path and source code. */
+  async addPageModule(pathname: string, code: string): Promise<void> {
+    const url = path.join('/pages/', util.cleanPath(pathname) + '.tsx')
+    const mod = await this.compile(url, { sourceCode: code })
+    this.#pageRouting.update(this.getRouteModule(mod))
+  }
+
+  /** add a new page module by given path and source code. */
+  async removePageModule(pathname: string): Promise<void> {
+    const url = path.join('/pages/', util.cleanPath(pathname) + '.tsx')
+    if (this.#modules.has(url)) {
+      await clearCompilation(this.#modules.get(url)!.jsFile)
+      this.#modules.delete(url)
+      this.#pageRouting.removeRoute(url)
+    }
+  }
+
   /** returns the route module by given module. */
   private getRouteModule({ url, hash }: Pick<Module, 'url' | 'hash'>): RouteModule {
-    const deps = this.lookupDeps(url).filter(({ isData, isStyle, isDynamic }) => !!(isData || (isStyle && isDynamic)))
-    return { url, hash, asyncDeps: deps.length > 0 ? deps : undefined }
+    const hasData = this.lookupDeps(url).filter((({ url }) => url.startsWith('#useDeno-'))).length > 0 || undefined
+    return { url, hash, hasData }
+  }
+
+  async getSSRData(loc: { pathname: string, search?: string }): Promise<[number, any]> {
+    if (!this.isSSRable(loc.pathname)) {
+      return [404, null]
+    }
+
+    const { status, data } = await this.renderPage(loc)
+    return [status, data]
+  }
+
+  private getHTMLScripts() {
+    const { baseUrl } = this.config
+
+    if (this.isDev) {
+      const mainJS = this.getMainJS()
+      return [
+        { src: util.cleanPath(`${baseUrl}/_aleph/main.${util.shortHash(computeHash(mainJS))}.js`), type: 'module' },
+        { src: util.cleanPath(`${baseUrl}/_aleph/-/deno.land/x/aleph/nomodule.js`), nomodule: true },
+      ]
+    }
+
+    const mainJS = this.getMainJS(true)
+    return ['polyfill', 'deps', 'shared'].map(name => {
+      const mod = this.#modules.get(`/${name}.js`)!
+      return { src: util.cleanPath(`${baseUrl}/_aleph/${name}.bundle.${util.shortHash(mod.hash)}.js`) }
+    }).concat([
+      { src: util.cleanPath(`${baseUrl}/_aleph/main.bundle.${util.shortHash(computeHash(mainJS))}.js`) },
+    ])
+  }
+
+  async getPageHtml(loc: { pathname: string, search?: string }): Promise<[number, string, Record<string, string> | null]> {
+    if (!this.isSSRable(loc.pathname)) {
+      const [url] = this.#pageRouting.createRouter(loc)
+      return [url.pagePath === '' ? 404 : 200, await this.getSPAIndexHtml(), null]
+    }
+
+    const { url, status, head, scripts, body, data } = await this.renderPage(loc)
+    const html = createHtml({
+      lang: url.locale,
+      head: head,
+      scripts: [
+        data ? { type: 'application/json', innerText: JSON.stringify(data, undefined, this.isDev ? 4 : 0), id: 'ssr-data' } : '',
+        ...this.getHTMLScripts(),
+        ...scripts
+      ],
+      body,
+      minify: !this.isDev
+    })
+    return [status, html, data]
+  }
+
+  async getSPAIndexHtml() {
+    const { defaultLocale } = this.config
+    const customLoading = await this.renderLoadingPage()
+    const html = createHtml({
+      lang: defaultLocale,
+      scripts: [
+        ...this.getHTMLScripts()
+      ],
+      head: customLoading?.head || [],
+      body: `<div id="__aleph">${customLoading?.body || ''}</div>`,
+      minify: !this.isDev
+    })
+    return html
+  }
+
+  /** build the application to a static site(SSG) */
+  async build() {
+    const start = performance.now()
+    const outputDir = this.outputDir
+    const distDir = path.join(outputDir, '_aleph')
+
+    // wait for app ready
+    await this.ready
+
+    // clear previous build
+    if (existsDirSync(outputDir)) {
+      for await (const entry of Deno.readDir(outputDir)) {
+        await Deno.remove(path.join(outputDir, entry.name), { recursive: entry.isDirectory })
+      }
+    }
+    await ensureDir(distDir)
+
+    //  optimizing
+    await this.optimize()
+    // ssg
+    await this.ssg()
+    // copy bundle dist
+    await this.copyDist()
+
+    // copy public assets
+    const publicDir = path.join(this.workingDir, 'public')
+    if (existsDirSync(publicDir)) {
+      let n = 0
+      for await (const { path: p } of walk(publicDir, { includeDirs: false, skip: [/(^|\/)\.DS_Store$/] })) {
+        const rp = util.trimPrefix(p, publicDir)
+        const fp = path.join(outputDir, rp)
+        const fi = await Deno.lstat(p)
+        await ensureDir(path.dirname(fp))
+        await Deno.copyFile(p, fp)
+        if (n === 0) {
+          log.info(colors.bold('- Public Assets'))
+        }
+        log.info('  ∆', rp.split('\\').join('/'), colors.dim('•'), formatBytesWithColor(fi.size))
+        n++
+      }
+    }
+
+    log.info(`Done in ${Math.round(performance.now() - start)}ms`)
+  }
+
+  async handleAPIRequest(req: ServerRequest, loc: { pathname: string, search?: string }) {
+    const [url, chain] = this.#apiRouting.createRouter({
+      ...loc,
+      pathname: decodeURI(loc.pathname)
+    })
+    if (url.pagePath !== '') {
+      const { url: moduleUrl } = chain[chain.length - 1]
+      try {
+        const { default: handle } = await import('file://' + this.#modules.get(moduleUrl)!.jsFile)
+        if (util.isFunction(handle)) {
+          await handle(new Request(req, url.params, url.query))
+        } else {
+          respondErrorJSON(req, 500, 'bad api handler')
+        }
+      } catch (err) {
+        respondErrorJSON(req, 500, err.message)
+        log.error('invoke API:', err)
+      }
+    } else {
+      respondErrorJSON(req, 404, 'not found')
+    }
+  }
+
+  createFSWatcher(): EventEmitter {
+    const e = new EventEmitter()
+    this.#fsWatchListeners.push(e)
+    return e
+  }
+
+  removeFSWatcher(e: EventEmitter) {
+    e.removeAllListeners()
+    const index = this.#fsWatchListeners.indexOf(e)
+    if (index > -1) {
+      this.#fsWatchListeners.splice(index, 1)
+    }
+  }
+
+  isHMRable(url: string) {
+    if (!this.isDev) {
+      return false
+    }
+    for (const ext of moduleExts) {
+      if (url.endsWith('.' + ext)) {
+        return url.startsWith('/pages/') ||
+          url.startsWith('/components/') ||
+          util.trimModuleExt(url) === '/app' ||
+          util.trimModuleExt(url) === '/404'
+      }
+    }
+    for (const plugin of this.config.plugins) {
+      if (plugin.type === 'loader' && plugin.test.test(url)) {
+        return plugin.acceptHMR
+      }
+    }
+    return false
+  }
+
+  /** inject HMR code  */
+  injectHMRCode({ url }: Module, content: string): string {
+    const DEV_PORT = Deno.env.get('ALEPH_DEV_PORT')
+    const alephModuleLocalUrlPrefix = DEV_PORT ? `http_localhost_${DEV_PORT}` : `deno.land/x/aleph@v${VERSION}`
+    const localUrl = this.toLocalImportUrl(url)
+    const hmrImportPath = getRelativePath(
+      path.dirname(localUrl),
+      `/-/${alephModuleLocalUrlPrefix}/framework/core/hmr.js`
+    )
+    const lines = [
+      `import { createHotContext } from ${JSON.stringify(hmrImportPath)};`,
+      `import.meta.hot = createHotContext(${JSON.stringify(url)});`
+    ]
+    const reactRefresh = this.config.framework === 'react' && isModuleURL(url)
+    if (reactRefresh) {
+      const refreshImportPath = getRelativePath(
+        path.dirname(localUrl),
+        `/-/${alephModuleLocalUrlPrefix}/framework/react/refresh.js`
+      )
+      lines.push(`import { RefreshRuntime, performReactRefresh } from ${JSON.stringify(refreshImportPath)};`)
+      lines.push('')
+      lines.push(
+        `const prevRefreshReg = window.$RefreshReg$;`,
+        `const prevRefreshSig = window.$RefreshSig$;`,
+        `Object.assign(window, {`,
+        `    $RefreshReg$: (type, id) => RefreshRuntime.register(type, ${JSON.stringify(url)} + " " + id),`,
+        `    $RefreshSig$: RefreshRuntime.createSignatureFunctionForTransform`,
+        `});`,
+      )
+    }
+    lines.push('')
+    lines.push(content)
+    lines.push('')
+    if (reactRefresh) {
+      lines.push(
+        'window.$RefreshReg$ = prevRefreshReg;',
+        'window.$RefreshSig$ = prevRefreshSig;',
+        'import.meta.hot.accept(performReactRefresh);'
+      )
+    } else {
+      lines.push('import.meta.hot.accept();')
+    }
+    return lines.join('\n')
   }
 
   /** get main js. */
   getMainJS(bundleMode = false): string {
-    const alephPkgUrl = getAlephPkgUrl()
+    const alephModuleUrl = getAlephModuleUrl()
     const { baseUrl, defaultLocale, framework } = this.config
     const config: Record<string, any> = {
       baseUrl,
       defaultLocale,
       locales: [],
       routes: this.#pageRouting.routes,
+      rewrites: this.config.rewrites,
       sharedModules: Array.from(this.#modules.values()).filter(({ url }) => {
         switch (util.trimModuleExt(url)) {
           case '/404':
@@ -749,10 +574,10 @@ export class Application {
     }
 
     if (bundleMode) {
-      return `var bootstrap=__ALEPH.pack["${alephPkgUrl}/framework/${framework}/bootstrap.ts"].default;bootstrap(${JSON.stringify(config)})`
+      return `var bootstrap=__ALEPH.pack["${alephModuleUrl}/framework/${framework}/bootstrap.ts"].default;bootstrap(${JSON.stringify(config)})`
     }
 
-    const prefix = alephPkgUrl.replace('https://', '').replace('http://localhost:', 'http_localhost_')
+    const prefix = alephModuleUrl.replace('https://', '').replace('http://localhost:', 'http_localhost_')
     return [
       (this.config.framework === 'react' && this.isDev) && `import "./-/${prefix}/framework/react/refresh.js"`,
       `import bootstrap from "./-/${prefix}/framework/${framework}/bootstrap.js"`,
@@ -760,14 +585,14 @@ export class Application {
     ].filter(Boolean).join('\n')
   }
 
-  /** fix import url */
-  private fixImportUrl(importUrl: string): string {
+  /** fix remote import url to local */
+  private toLocalImportUrl(importUrl: string): string {
     const isRemote = util.isLikelyHttpURL(importUrl)
     if (isRemote) {
       const url = new URL(importUrl)
       let pathname = url.pathname
-      let ok = [...moduleExts, 'css', 'pcss'].includes(path.extname(pathname).slice(1))
-      if (ok) {
+      let ok = moduleExts.findIndex(ext => pathname.endsWith('.' + ext)) > -1
+      if (!ok) {
         for (const plugin of this.config.plugins) {
           if (plugin.type === 'loader' && plugin.test.test(pathname)) {
             ok = true
@@ -775,12 +600,12 @@ export class Application {
           }
         }
       }
-      if (!ok) {
-        pathname += '.js'
-      }
       let search = Array.from(url.searchParams.entries()).map(([key, value]) => value ? `${key}=${value}` : key)
       if (search.length > 0) {
         pathname += '_' + search.join(',')
+      }
+      if (!ok) {
+        pathname += '.js'
       }
       return [
         '/-/',
@@ -791,58 +616,6 @@ export class Application {
       ].join('')
     }
     return importUrl
-  }
-
-  /** preprocess css with postcss plugins */
-  private async preprocessCSS(sourceCode: string) {
-    let t: number | null = null
-    if (this.#postcssReady === false) {
-      t = performance.now()
-      this.#postcssReady = Promise.all(this.config.postcss.plugins.map(async p => {
-        let name: string | null = null
-        if (util.isNEString(p)) {
-          name = p
-        } else if (Array.isArray(p) && util.isNEString(p[0])) {
-          name = p[0]
-        }
-        if (name) {
-          const { default: Plugin } = await import(`https://esm.sh/${name}?external=postcss@8.1.4&no-check`)
-          this.#postcssPlugins[name] = Plugin
-        }
-      }))
-    }
-    if (this.#postcssReady instanceof Promise) {
-      await this.#postcssReady
-      this.#postcssReady = true
-    }
-    if (t !== null) {
-      log.debug(`${this.config.postcss.plugins.length} postcss plugins loaded in ${Math.round(performance.now() - t)}ms`)
-    }
-    const pcss = (await postcss(this.config.postcss.plugins.map(p => {
-      if (typeof p === 'string') {
-        return this.#postcssPlugins[p]
-      } else if (Array.isArray(p)) {
-        const [plugin, options] = p
-        if (util.isNEString(plugin)) {
-          const _plugin = this.#postcssPlugins[plugin]
-          if (util.isFunction(_plugin)) {
-            let fn = _plugin as Function
-            return fn(options)
-          } else {
-            return plugin
-          }
-        } else {
-          plugin(options)
-        }
-      } else {
-        return p
-      }
-    })).process(sourceCode).async()).content
-    if (!this.isDev) {
-      return this.#cleanCSS.minify(pcss).styles
-    } else {
-      return pcss
-    }
   }
 
   /** transpile code without types checking. */
@@ -860,7 +633,25 @@ export class Application {
       log.debug(`init compiler wasm in ${Math.round(performance.now() - t)}ms`)
     }
 
-    return transpileSync(sourceCode, options)
+    return transpileSync(sourceCode, {
+      ...options,
+      importMap: this.importMap,
+      alephModuleUrl: getAlephModuleUrl(),
+      reactVersion: this.config.reactVersion,
+      isDev: this.isDev,
+    })
+  }
+
+  /** apply loader */
+  private async applyLoader(loader: LoaderPlugin, input: { url: string, content: Uint8Array, bundleMode?: boolean, map?: string }): Promise<Omit<LoaderTransformResult, 'loader'>> {
+    const { code, map, loader: next } = await loader.transform(input)
+    if (next) {
+      const nextLoader = this.config.plugins.find(({ name }) => name === next)
+      if (nextLoader && nextLoader.type === 'loader') {
+        return this.applyLoader(nextLoader, { ...input, content: (new TextEncoder).encode(code), map })
+      }
+    }
+    return { code, map }
   }
 
   /** download and compile a moudle by given url, then cache on the disk. */
@@ -873,9 +664,8 @@ export class Application {
       bundledModules?: string[]
     }
   ): Promise<Module> {
-    const alephPkgUrl = getAlephPkgUrl()
     const isRemote = util.isLikelyHttpURL(url)
-    const localUrl = this.fixImportUrl(url)
+    const localUrl = this.toLocalImportUrl(url)
     const name = util.trimModuleExt(path.basename(localUrl))
     const saveDir = path.join(this.buildDir, path.dirname(localUrl))
     const metaFile = path.join(saveDir, `${name}.meta.json`)
@@ -884,20 +674,24 @@ export class Application {
     let mod: Module
     if (this.#modules.has(url)) {
       mod = this.#modules.get(url)!
-      if (!forceCompile && !sourceCode && !(bundleMode && mod.bundlingFile === '')) {
+      if (!forceCompile && !sourceCode) {
+        return mod
+      }
+    } else if (bundleMode && this.#bundlingModules.has(url)) {
+      mod = this.#bundlingModules.get(url)!
+      if (!forceCompile && !sourceCode) {
         return mod
       }
     } else {
-      mod = this.newModule(url)
+      mod = this.newModule(url, bundleMode)
       try {
         if (existsFileSync(metaFile)) {
-          const { url, sourceHash, hash, deps } = JSON.parse(await Deno.readTextFile(metaFile))
-          if (url === url && util.isNEString(sourceHash) && util.isNEString(hash) && util.isArray(deps)) {
+          const { url, sourceHash, deps } = JSON.parse(await Deno.readTextFile(metaFile))
+          if (url === url && util.isNEString(sourceHash) && util.isArray(deps)) {
             mod.sourceHash = sourceHash
-            mod.hash = hash
             mod.deps = deps
           } else {
-            log.warn(`invalid metadata ('${name}.meta.json')`)
+            log.warn(`removing invalid metadata '${name}.meta.json'`)
             Deno.remove(metaFile)
           }
         }
@@ -905,10 +699,11 @@ export class Application {
     }
 
     let sourceContent = new Uint8Array()
-    let changed = false
-    let fsync = false
+    let contentType: string | null = null
     let jsContent = ''
     let jsSourceMap: string | null = null
+    let changed = false
+    let fsync = false
 
     if (sourceCode) {
       sourceContent = (new TextEncoder).encode(sourceCode)
@@ -918,36 +713,18 @@ export class Application {
         changed = true
       }
     } else if (isRemote) {
-      const isLocalhost = /^https?:\/\/localhost(:\d+)?\//.test(url)
-      if (['js', 'ts', 'jsx', 'tsx'].includes(mod.loader) && !isLocalhost) {
-        try {
-          sourceContent = await this.fetchDependency(url)
-          const sourceHash = computeHash(sourceContent)
-          if (mod.sourceHash === '' || mod.sourceHash !== sourceHash) {
-            mod.sourceHash = sourceHash
-            changed = true
-          }
-        } catch (err) {
-          log.error(`dependency '${url}' not found`)
-          mod.error = err
-          return mod
+      try {
+        const [content, headers] = await this.fetchRemoteModule(url)
+        const sourceHash = computeHash(content)
+        sourceContent = content
+        contentType = headers.get('content-type')
+        if (mod.sourceHash === '' || mod.sourceHash !== sourceHash) {
+          mod.sourceHash = sourceHash
+          changed = true
         }
-      } else {
-        // todo: cache non-localhost file to local drive
-        try {
-          if (!isLocalhost) {
-            log.info('Download', url)
-          }
-          const buffer = await fetch(url).then(resp => resp.arrayBuffer())
-          sourceContent = await Deno.readAll(new Deno.Buffer(buffer))
-          const sourceHash = computeHash(sourceContent)
-          if (mod.sourceHash === '' || mod.sourceHash !== sourceHash) {
-            mod.sourceHash = sourceHash
-            changed = true
-          }
-        } catch (err) {
-          throw new Error(`Download ${url}: ${err.message}`)
-        }
+      } catch (err) {
+        log.error(`Download ${url}:`, err)
+        return mod
       }
     } else {
       const filepath = path.join(this.srcDir, url)
@@ -960,150 +737,142 @@ export class Application {
         }
       } catch (err) {
         if (err instanceof Deno.errors.NotFound) {
-          log.error(`module '${url}' not found`)
-          mod.error = err
+          log.error(`local module '${url}' not found`)
           return mod
         }
         throw err
       }
     }
 
+    // compute hash
+    mod.hash = computeHash(mod.sourceHash + buildChecksum)
+    if (bundleMode) {
+      mod.jsFile = path.join(saveDir, `${name}.bundling.${util.shortHash(mod.hash)}.js`)
+    } else {
+      mod.jsFile = path.join(saveDir, name + (isRemote ? '' : `.${util.shortHash(mod.hash)}`) + '.js')
+    }
+
     // check previous compilation output if the source content doesn't changed.
-    if (!changed) {
-      if (bundleMode) {
-        let bundlingFile = path.join(saveDir, `${name}.bundling.${util.shortHash(mod.sourceHash)}.js`)
-        if (existsFileSync(bundlingFile)) {
-          mod.bundlingFile = bundlingFile
-        } else {
-          changed = true
-        }
-      } else if (isRemote || mod.hash !== '') {
-        let jsFile = path.join(saveDir, name + (isRemote ? '' : `.${util.shortHash(mod.hash)}`) + '.js')
-        if (existsFileSync(jsFile)) {
-          mod.jsFile = jsFile
-        } else {
-          changed = true
-        }
-      }
+    if (!changed && !existsFileSync(mod.jsFile)) {
+      changed = true
     }
 
     // compile source code
     if (changed) {
       let sourceCode = (new TextDecoder).decode(sourceContent)
-      let loader = mod.loader
+      let sourceType = path.extname(url).slice(1)
+
+      if (sourceType == 'mjs') {
+        sourceType = 'js'
+      }
+      if (!moduleExts.includes(sourceType) && isRemote) {
+        switch (contentType?.split(';')[0].trim()) {
+          case 'application/javascript':
+          case 'text/javascript':
+            sourceType = 'js'
+            break
+          case 'text/typescript':
+            sourceType = 'ts'
+            break
+          case 'text/jsx':
+            sourceType = 'jsx'
+            break
+          case 'text/tsx':
+            sourceType = 'tsx'
+            break
+        }
+      }
 
       for (const plugin of this.config.plugins) {
         if (plugin.type === 'loader' && plugin.test.test(url)) {
-          const { code, format = 'js' } = await plugin.transform(sourceContent, url)
+          const { code } = await this.applyLoader(plugin, { url, content: sourceContent, bundleMode })
           sourceCode = code
-          loader = format
-          mod.loader = format
+          sourceType = 'js'
           break
         }
       }
 
-      if (loader === 'css') {
-        const css = await this.preprocessCSS(sourceCode)
-        sourceCode = [
-          `import { applyCSS } from "${alephPkgUrl}/framework/core/style.ts";`,
-          `export default function __applyCSS() {`,
-          `  applyCSS(${JSON.stringify(url)}, ${JSON.stringify(css)});`,
-          `}`,
-          bundleMode && `__ALEPH.pack[${JSON.stringify(url)}] = { default: __applyCSS };`
-        ].filter(Boolean).join('\n')
-        loader = 'js'
-        // todo: css source map
+      switch (sourceType) {
+        case 'js':
+        case 'jsx':
+        case 'ts':
+        case 'tsx':
+          break
+        default:
+          log.warn(`Unsupported module '${url}'`)
+          return mod
       }
 
-      if (loader !== 'js' && loader !== 'ts' && loader !== 'jsx' && loader !== 'tsx') {
-        log.error(`Unknown loader '${path.extname(url).slice(1)}'`)
-        mod.error = new Error('unknown loader')
-        return mod
+      const t = performance.now()
+      const swcOptions: SWCOptions = {
+        target: 'es2020',
+        sourceType,
+        sourceMap: this.isDev,
+      }
+      log.debug(url)
+      const { code, map, deps, inlineStyles } = await this.transpile(sourceCode, {
+        url,
+        bundleMode,
+        bundledModules,
+        swcOptions
+      })
+
+      fsync = true
+      jsContent = code
+      if (map) {
+        jsSourceMap = map
       }
 
-      try {
-        const t = performance.now()
-        const swcOptions: SWCOptions = {
-          target: 'es2020',
-          sourceType: loader,
-          sourceMap: this.isDev,
-        }
-        const { code, map, deps, inlineStyles } = await this.transpile(sourceCode, {
-          url,
-          bundleMode,
-          bundledModules,
-          swcOptions,
-          importMap: this.importMap,
-          reactVersion: this.config.reactVersion,
-          isDev: this.isDev,
-        })
-
-        fsync = true
-        jsContent = code
-        if (map) {
-          jsSourceMap = map
-        }
-
-        // resolve inline-style
-        await Promise.all(Object.entries(inlineStyles).map(async ([key, style]) => {
-          let type = style.type
-          let tpl = style.quasis.reduce((css, quais, i, a) => {
-            css += quais
-            if (i < a.length - 1) {
-              css += `%%aleph-inline-style-expr-${i}%%`
-            }
-            return css
-          }, '')
-            .replace(/\:\s*%%aleph-inline-style-expr-(\d+)%%/g, (_, id) => `: var(--aleph-inline-style-expr-${id})`)
-            .replace(/%%aleph-inline-style-expr-(\d+)%%/g, (_, id) => `/*%%aleph-inline-style-expr-${id}%%*/`)
-          if (type !== 'css') {
-            for (const plugin of this.config.plugins) {
-              if (plugin.type === 'loader' && plugin.test.test(`${key}.${type}`)) {
-                const { code, format } = await plugin.transform((new TextEncoder).encode(tpl), url)
-                if (format === 'css') {
-                  tpl = code
-                  type = 'css'
-                  break
-                }
+      // resolve inline-style
+      await Promise.all(Object.entries(inlineStyles).map(async ([key, style]) => {
+        let tpl = style.quasis.reduce((tpl, quais, i, a) => {
+          tpl += quais
+          if (i < a.length - 1) {
+            tpl += `%%aleph-inline-style-expr-${i}%%`
+          }
+          return tpl
+        }, '')
+          .replace(/\:\s*%%aleph-inline-style-expr-(\d+)%%/g, (_, id) => `: var(--aleph-inline-style-expr-${id})`)
+          .replace(/%%aleph-inline-style-expr-(\d+)%%/g, (_, id) => `/*%%aleph-inline-style-expr-${id}%%*/`)
+        if (style.type !== 'css') {
+          for (const plugin of this.config.plugins) {
+            if (plugin.type === 'loader' && plugin.test.test(`.${style.type}`)) {
+              const { code, loader } = await plugin.transform({ url, content: (new TextEncoder).encode(tpl) })
+              if (loader === 'css-loader') {
+                tpl = code
+                break
               }
             }
           }
-          if (type === 'css') {
-            tpl = await this.preprocessCSS(tpl)
-            tpl = tpl.replace(
-              /\: var\(--aleph-inline-style-expr-(\d+)\)/g,
-              (_, id) => ': ${' + style.exprs[parseInt(id)] + '}'
-            ).replace(
-              /\/\*%%aleph-inline-style-expr-(\d+)%%\*\//g,
-              (_, id) => '${' + style.exprs[parseInt(id)] + '}'
-            )
-            jsContent = jsContent.replace(`"%%${key}-placeholder%%"`, '`' + tpl + '`')
-          }
-        }))
+        }
+        // tpl = await this.preprocessCSS(tpl)
+        tpl = tpl.replace(
+          /\: var\(--aleph-inline-style-expr-(\d+)\)/g,
+          (_, id) => ': ${' + style.exprs[parseInt(id)] + '}'
+        ).replace(
+          /\/\*%%aleph-inline-style-expr-(\d+)%%\*\//g,
+          (_, id) => '${' + style.exprs[parseInt(id)] + '}'
+        )
+        jsContent = jsContent.replace(`"%%${key}-placeholder%%"`, '`' + tpl + '`')
+      }))
 
-        mod.deps = deps.map(({ specifier, isDynamic }) => {
-          const dep: DependencyDescriptor = { url: specifier, hash: '' }
-          if (isDynamic) {
-            dep.isDynamic = true
+      mod.deps = deps.map(({ specifier, isDynamic }) => {
+        const dep: DependencyDescriptor = { url: specifier, hash: '' }
+        if (isDynamic) {
+          dep.isDynamic = true
+        }
+        if (dep.url.startsWith('#useDeno-')) {
+          dep.hash = util.trimPrefix(dep.url, '#useDeno-')
+          if (!this.config.ssr) {
+            log.warn(`use 'useDeno' hook in SPA mode: ${url}`)
           }
-          if (dep.url.startsWith('#useDeno-')) {
-            dep.isData = true
-            dep.hash = util.trimPrefix(dep.url, '#useDeno-')
-            if (!this.config.ssr) {
-              log.warn(`use 'useDeno' hook in SPA mode`)
-            }
-          } else if (dep.url.startsWith('#inline-style-')) {
-            dep.isStyle = true
-            dep.hash = util.trimPrefix(dep.url, '#inline-style-')
-          }
-          return dep
-        })
+        } else if (dep.url.startsWith('#inline-style-')) {
+          dep.hash = util.trimPrefix(dep.url, '#inline-style-')
+        }
+        return dep
+      })
 
-        log.debug(`compile '${url}' in ${Math.round(performance.now() - t)}ms ${bundleMode ? '(bundle mode)' : ''}`)
-      } catch (e) {
-        mod.error = new Error('transpile error')
-        return mod
-      }
+      log.debug(`compile '${url}' in ${Math.round(performance.now() - t)}ms ${bundleMode ? '(bundle mode)' : ''}`)
     }
 
     // compile deps
@@ -1112,10 +881,7 @@ export class Application {
     })
     for (const dep of deps) {
       const depMod = await this.compile(dep.url, { bundleMode, bundledModules })
-      if (depMod.loader === 'css' && !dep.isStyle) {
-        dep.isStyle = true
-      }
-      if (dep.hash === '' || dep.hash !== depMod.hash || bundleMode) {
+      if (dep.hash === '' || dep.hash !== depMod.hash) {
         dep.hash = depMod.hash
         if (!util.isLikelyHttpURL(dep.url)) {
           const relativePathname = getRelativePath(
@@ -1123,11 +889,7 @@ export class Application {
             util.trimModuleExt(dep.url)
           )
           if (!changed && jsContent === '') {
-            if (!bundleMode) {
-              jsContent = await Deno.readTextFile(mod.jsFile)
-            } else {
-              jsContent = await Deno.readTextFile(mod.bundlingFile)
-            }
+            jsContent = await Deno.readTextFile(mod.jsFile)
           }
           const newContent = jsContent.replace(reHashResolve, (s, key, spaces, ql, importPath, qr) => {
             const importPathname = importPath.replace(reHashJs, '')
@@ -1151,83 +913,44 @@ export class Application {
     }
 
     if (fsync) {
-      if (!bundleMode) {
-        mod.hash = computeHash(jsContent + buildChecksum)
-        mod.jsFile = path.join(saveDir, name + (isRemote ? '' : `.${util.shortHash(mod.hash)}`) + '.js')
-        await cleanupCompilation(mod.jsFile)
-        await Promise.all([
-          ensureTextFile(mod.jsFile, jsContent + (jsSourceMap ? '//# sourceMappingURL=' + path.basename(mod.jsFile) + '.map' : '')),
-          jsSourceMap ? ensureTextFile(mod.jsFile + '.map', jsSourceMap) : Promise.resolve(),
-          ensureTextFile(metaFile, JSON.stringify({
-            url,
-            sourceHash: mod.sourceHash,
-            hash: mod.hash,
-            deps: mod.deps,
-          }, undefined, 4)),
-        ])
-      } else {
-        mod.bundlingFile = path.join(saveDir, `${name}.bundling.${util.shortHash(mod.sourceHash)}.js`)
-        await cleanupCompilation(mod.bundlingFile)
-        await Promise.all([
-          await ensureTextFile(mod.bundlingFile, jsContent),
-          await ensureTextFile(metaFile, JSON.stringify({
-            url,
-            sourceHash: mod.sourceHash,
-            hash: mod.hash || mod.sourceHash,
-            deps: mod.deps,
-          }, undefined, 4))
-        ])
-      }
+      await clearCompilation(mod.jsFile)
+      await Promise.all([
+        ensureTextFile(mod.jsFile, jsContent + (!bundleMode && jsSourceMap ? '//# sourceMappingURL=' + path.basename(mod.jsFile) + '.map' : '')),
+        !bundleMode && jsSourceMap ? ensureTextFile(mod.jsFile + '.map', jsSourceMap) : Promise.resolve(),
+        ensureTextFile(metaFile, JSON.stringify({
+          url,
+          sourceHash: mod.sourceHash,
+          deps: mod.deps,
+        }, undefined, 4)),
+      ])
     }
 
     return mod
   }
 
   /** check compilation side-effect caused by dependency graph. */
-  private async checkCompilationSideEffect(url: string, callback?: (mod: Module) => void) {
+  private async checkCompilationSideEffect(url: string, callback: (mod: Module) => void) {
     const { hash } = this.#modules.get(url)!
 
     for (const mod of this.#modules.values()) {
       for (const dep of mod.deps) {
         if (dep.url === url) {
           if (dep.hash !== "" && dep.hash !== hash) {
-            log.debug('compilation side-effect:', mod.url, colors.dim('<-'), url)
             dep.hash = hash
             const relativePath = getRelativePath(
               path.dirname(mod.url),
               util.trimModuleExt(dep.url)
             )
-            let jsContent = await Deno.readTextFile(mod.jsFile)
-            jsContent = jsContent.replace(reHashResolve, (s, key, spaces, ql, importPath, qr) => {
-              if (importPath.replace(reHashJs, '') === relativePath) {
-                return `${key}${spaces}${ql}${relativePath}.${util.shortHash(dep.hash)}.js${qr}`
-              }
-              return s
-            })
-            let sourceMap: string | null = null
-            if (existsFileSync(mod.jsFile + '.map')) {
-              sourceMap = Deno.readTextFileSync(mod.jsFile + '.map')
-            }
-            mod.hash = computeHash(jsContent + buildChecksum)
-            mod.jsFile = `${mod.jsFile.replace(reHashJs, '')}.${util.shortHash(mod.hash)}.js`
-            jsContent = jsContent.split('\n').map(line => {
-              if (line.startsWith('//# sourceMappingURL=')) {
-                return `//# sourceMappingURL=${path.basename(mod.jsFile).replace(reHashJs, '')}.${util.shortHash(mod.hash)}.js.map`
-              }
-              return line
-            }).join('\n')
-            await cleanupCompilation(mod.jsFile)
-            await Promise.all([
-              ensureTextFile(mod.jsFile.replace(reHashJs, '') + '.meta.json', JSON.stringify({
-                url: mod.url,
-                sourceHash: mod.sourceHash,
-                hash: mod.hash,
-                deps: mod.deps,
-              }, undefined, 4)),
-              ensureTextFile(mod.jsFile, jsContent),
-              sourceMap ? ensureTextFile(mod.jsFile + '.map', sourceMap) : Promise.resolve(),
-            ])
-            callback && callback(mod)
+            const jsContent = (await Deno.readTextFile(mod.jsFile))
+              .replace(reHashResolve, (s, key, spaces, ql, importPath, qr) => {
+                if (importPath.replace(reHashJs, '') === relativePath) {
+                  return `${key}${spaces}${ql}${relativePath}.${util.shortHash(dep.hash)}.js${qr}`
+                }
+                return s
+              })
+            await ensureTextFile(mod.jsFile, jsContent)
+            callback(mod)
+            log.debug('compilation side-effect:', mod.url, colors.dim('<-'), url)
             this.checkCompilationSideEffect(mod.url, callback)
           }
           break
@@ -1237,7 +960,7 @@ export class Application {
   }
 
   /** fetch dependency content, use deno builtin cache system */
-  private async fetchDependency(url: string): Promise<Uint8Array> {
+  private async fetchRemoteModule(url: string): Promise<[Uint8Array, Headers]> {
     const u = new URL(url)
     if (url.startsWith('https://esm.sh/')) {
       if (this.isDev && !u.searchParams.has('dev')) {
@@ -1249,29 +972,67 @@ export class Application {
     const { protocol, hostname, port, pathname, search } = u
     const versioned = reFullVersion.test(pathname)
     const reload = this.#reloading || !versioned
+    const isLocalhost = /^https?:\/\/localhost(:\d+)?\//.test(url)
     const cacheDir = path.join(this.#denoCacheDir, 'deps', util.trimSuffix(protocol, ':'), hostname + (port ? '_PORT' + port : ''))
-    const cacheFilename = path.join(cacheDir, (new Sha256()).update(pathname + search).hex())
+    const hash = createHash('sha256').update(pathname + search).toString()
+    const contentFile = path.join(cacheDir, hash)
+    const metaFile = path.join(cacheDir, hash + '.metadata.json')
 
-    if (!reload && existsFileSync(cacheFilename)) {
-      return await Deno.readFile(cacheFilename)
+    if (!reload && !isLocalhost && existsFileSync(contentFile) && existsFileSync(metaFile)) {
+      const [content, meta] = await Promise.all([
+        Deno.readFile(contentFile),
+        Deno.readTextFile(metaFile),
+      ])
+      try {
+        const { headers } = JSON.parse(meta)
+        return [
+          content,
+          new Headers(headers)
+        ]
+      } catch (e) { }
     }
 
     // download dep when deno cache failed
-    log.info('Download', url)
-    const buffer = await fetch(u.toString()).then(resp => {
-      if (resp.status !== 200) {
-        return Promise.reject(new Error(resp.statusText))
+    let err = new Error('Unknown')
+    for (let i = 0; i < 15; i++) {
+      if (i === 0) {
+        if (!isLocalhost) {
+          log.info('Download', url)
+        }
+      } else {
+        log.debug('Download error:', err)
+        log.warn(`Download ${url} failed, retrying...`)
       }
-      return resp.arrayBuffer()
-    })
-    const content = await Deno.readAll(new Deno.Buffer(buffer))
-    await Deno.writeFile(cacheFilename, content)
-    return content
+      try {
+        const resp = await fetch(u.toString())
+        if (resp.status >= 400) {
+          return Promise.reject(new Error(resp.statusText))
+        }
+        const buffer = await resp.arrayBuffer()
+        const content = await Deno.readAll(new Deno.Buffer(buffer))
+        if (!isLocalhost) {
+          await ensureDir(cacheDir)
+          Deno.writeFile(contentFile, content)
+          Deno.writeTextFile(metaFile, JSON.stringify({
+            headers: Array.from(resp.headers.entries()).reduce((m, [k, v]) => {
+              m[k] = v
+              return m
+            }, {} as Record<string, string>),
+            url
+          }, undefined, 4))
+        }
+        return [content, resp.headers]
+      } catch (e) {
+        err = e
+      }
+    }
+
+    return Promise.reject(err)
   }
 
   /** bundle modules for production. */
   private async bundle() {
-    const alephPkgUrl = getAlephPkgUrl()
+    const alephModuleUrl = getAlephModuleUrl()
     const refCounter = new Map<string, number>()
     const lookup = (url: string) => {
       if (this.#modules.has(url)) {
@@ -1291,7 +1052,7 @@ export class Application {
     const pageModules: Module[] = []
 
     // add framework bootstrap
-    refCounter.set(`${alephPkgUrl}/framework/${this.config.framework}/bootstrap.ts`, 1)
+    refCounter.set(`${alephModuleUrl}/framework/${this.config.framework}/bootstrap.ts`, 1)
     if (appModule) {
       await this.compile(appModule.url, { bundleMode: true })
       lookup(appModule.url)
@@ -1304,11 +1065,6 @@ export class Application {
       const mod = this.getModule(url)
       if (mod) {
         lookup(url)
-        mod.deps.forEach(dep => {
-          if (dep.isStyle) {
-            lookup(dep.url)
-          }
-        })
         pageModules.push(mod)
       }
     }))
@@ -1345,14 +1101,14 @@ export class Application {
 
   /** create polyfill bundle. */
   private async createPolyfillBundle() {
-    const alephPkgUrl = getAlephPkgUrl()
+    const alephModuleUrl = getAlephModuleUrl()
     const { buildTarget } = this.config
     const hash = computeHash(AlephRuntimeCode + buildTarget + buildChecksum + Deno.version.deno)
     const polyfillFile = path.join(this.buildDir, `polyfill.bundle.${util.shortHash(hash)}.js`)
     const polyfillMod = this.newModule('/polyfill.js')
     polyfillMod.hash = polyfillMod.sourceHash = hash
     if (!existsFileSync(polyfillFile)) {
-      const rawPolyfillFile = `${alephPkgUrl}/compiler/polyfills/${buildTarget}/polyfill.js`
+      const rawPolyfillFile = `${alephModuleUrl}/compiler/polyfills/${buildTarget}/polyfill.js`
       await this.runDenoBundle(rawPolyfillFile, polyfillFile, AlephRuntimeCode, true)
     }
     log.info(`  {} polyfill (${buildTarget.toUpperCase()}) ${colors.dim('• ' + util.formatBytes(Deno.statSync(polyfillFile).size))}`)
@@ -1361,11 +1117,14 @@ export class Application {
   /** create chunk bundle. */
   private async createChunkBundle(name: string, deps: string[]) {
     const bundlingCode = deps.map((url, i) => {
-      const mod = this.#modules.get(url)
+      let mod = this.#modules.get(url)
+      if (!mod) {
+        mod = this.#bundlingModules.get(url)
+      }
       if (mod) {
-        const importUrl = util.isLikelyHttpURL(mod.url) ? mod.jsFile : mod.bundlingFile
-        return importUrl ? [
-          `import * as ${name}_mod_${i} from ${JSON.stringify('file://' + importUrl)}`,
+        const { jsFile } = mod
+        return jsFile ? [
+          `import * as ${name}_mod_${i} from ${JSON.stringify('file://' + jsFile)}`,
           `__ALEPH.pack[${JSON.stringify(url)}] = ${name}_mod_${i}`
         ] : []
       }
@@ -1385,14 +1144,14 @@ export class Application {
 
   /** create page bundle. */
   private async createPageBundle(mod: Module, bundledModules: string[]) {
-    const { bundlingFile, hash } = await this.compile(mod.url, { bundleMode: true, bundledModules })
-    const pathname = util.trimSuffix(bundlingFile.replace(reHashJs, ''), '.bundling')
+    const { jsFile, hash } = await this.compile(mod.url, { bundleMode: true, bundledModules })
+    const pathname = util.trimSuffix(jsFile.replace(reHashJs, ''), '.bundling')
     const bundleEntryFile = pathname + `.bundle.entry.js`
     const bundleFile = pathname + `.bundle.${util.shortHash(hash)}.js`
 
     if (!existsFileSync(bundleFile)) {
       const bundleEntryCode = [
-        `import * as mod from ${JSON.stringify('file://' + bundlingFile)}`,
+        `import * as mod from ${JSON.stringify('file://' + jsFile)}`,
         `__ALEPH.pack[${JSON.stringify(mod.url)}] = mod`
       ].join('\n')
       await Deno.writeTextFile(bundleEntryFile, bundleEntryCode)
@@ -1448,7 +1207,7 @@ export class Application {
       code = ret.code
     }
 
-    await cleanupCompilation(bundleFile)
+    await clearCompilation(bundleFile)
     await Deno.writeTextFile(bundleFile, code)
   }
 
@@ -1477,8 +1236,8 @@ export class Application {
         }
       }),
       ...pageModules.map(async mod => {
-        const { bundlingFile, hash } = mod
-        const pathname = util.trimSuffix(bundlingFile.replace(reHashJs, ''), '.bundling')
+        const { jsFile, hash } = mod
+        const pathname = util.trimSuffix(jsFile.replace(reHashJs, ''), '.bundling')
         const bundleFile = pathname + `.bundle.${util.shortHash(hash)}.js`
         const saveAs = path.join(this.outputDir, `/_aleph/`, util.trimPrefix(pathname, this.buildDir) + `.bundle.${util.shortHash(hash)}.js`)
         await ensureDir(path.dirname(saveAs))
@@ -1596,11 +1355,7 @@ export class Application {
         url,
         App,
         undefined,
-        await Promise.all(imports),
-        [
-          appModule ? this.lookupDeps(appModule.url).filter(dep => !!dep.isStyle) : [],
-          ...pageModuleChain.map(({ url }) => this.lookupDeps(url).filter(dep => !!dep.isStyle)).flat()
-        ].flat()
+        await Promise.all(imports)
       )
       ret.head = head
       ret.scripts = await Promise.all(scripts.map(async (script: Record<string, any>) => {
@@ -1659,8 +1414,7 @@ export class Application {
         url,
         undefined,
         E404,
-        [],
-        e404Module ? this.lookupDeps(e404Module.url).filter(dep => !!dep.isStyle) : []
+        []
       )
       ret.head = head
       ret.scripts = await Promise.all(scripts.map(async (script: Record<string, any>) => {
@@ -1699,8 +1453,7 @@ export class Application {
         router,
         undefined,
         undefined,
-        [{ url: loadingModule.url, Component: Loading }],
-        this.lookupDeps(loadingModule.url).filter(dep => !!dep.isStyle)
+        [{ url: loadingModule.url, Component: Loading }]
       )
       return {
         head,
@@ -1711,21 +1464,21 @@ export class Application {
   }
 
   /** lookup deps recurively. */
-  private lookupDeps(url: string, __deps: DependencyDescriptor[] = [], __tracing: Set<string> = new Set()) {
+  private lookupDeps(url: string, deps: DependencyDescriptor[] = [], tracing: Set<string> = new Set()) {
     const mod = this.getModule(url)
     if (!mod) {
-      return __deps
+      return deps
     }
-    if (__tracing.has(url)) {
-      return __deps
+    if (tracing.has(url)) {
+      return deps
     }
-    __tracing.add(url)
-    __deps.push(...mod.deps.filter(({ url }) => __deps.findIndex(i => i.url === url) === -1))
+    tracing.add(url)
+    deps.push(...mod.deps.filter(({ url }) => deps.findIndex(i => i.url === url) === -1))
     mod.deps.forEach(({ url }) => {
       if (isModuleURL(url) && !util.isLikelyHttpURL(url)) {
-        this.lookupDeps(url, __deps, __tracing)
+        this.lookupDeps(url, deps, tracing)
       }
     })
-    return __deps
+    return deps
   }
 }

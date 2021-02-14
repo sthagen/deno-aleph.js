@@ -4,9 +4,9 @@ import events from '../core/events.ts'
 import { RouteModule, Routing } from '../core/routing.ts'
 import { RouterContext } from './context.ts'
 import { E400MissingComponent, E404Page, ErrorBoundary } from './error.ts'
+import { importModule, isLikelyReactComponent, loadPageData } from './helper.ts'
 import type { PageRoute } from './pageprops.ts'
 import { createPageProps } from './pageprops.ts'
-import { importModule, isLikelyReactComponent, loadPageData } from './util.ts'
 
 export default function Router({
   customComponents,
@@ -45,9 +45,8 @@ export default function Router({
       const imports = pageModuleChain.map(async mod => {
         const [{ default: Component }] = await Promise.all([
           importModule(baseUrl, mod, e.forceRefetch),
-          mod.asyncDeps?.filter(({ isData }) => !!isData).length ? loadPageData(url) : Promise.resolve(),
+          mod.hasData ? loadPageData(url) : Promise.resolve(),
         ])
-        await Promise.all(mod.asyncDeps?.filter(({ isStyle }) => !!isStyle).map(dep => importModule(baseUrl, dep)) || [])
         return {
           url: mod.url,
           Component
@@ -125,7 +124,7 @@ export default function Router({
       const [url, pageModuleChain] = routing.createRouter({ pathname, search })
       if (url.pagePath !== '') {
         pageModuleChain.map(mod => {
-          if (mod.asyncDeps?.filter(({ isData }) => !!isData).length) {
+          if (mod.hasData) {
             loadPageData(url)
           }
           importModule(baseUrl, mod)
