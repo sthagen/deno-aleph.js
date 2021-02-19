@@ -1,11 +1,9 @@
-// Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
-// Copyright 2020-2021 postUI Lab. All rights reserved. MIT license.
-
 use crate::error::{DiagnosticBuffer, ErrorBuffer};
-use crate::fast_refresh::fast_refresh_fold;
-use crate::fixer::{compat_fixer_fold, jsx_link_fixer_fold};
+use crate::fast_refresh::react_refresh_fold;
+use crate::fixer::compat_fixer_fold;
 use crate::jsx::aleph_jsx_fold;
-use crate::resolve::{aleph_resolve_fold, Resolver};
+use crate::resolve::Resolver;
+use crate::resolve_fold::aleph_resolve_fold;
 use crate::source_type::SourceType;
 
 use std::{cell::RefCell, path::Path, rc::Rc};
@@ -33,6 +31,7 @@ pub struct EmitOptions {
   pub jsx_factory: String,
   pub jsx_fragment_factory: String,
   pub is_dev: bool,
+  pub transpile_only: bool,
   pub source_map: bool,
 }
 
@@ -43,6 +42,7 @@ impl Default for EmitOptions {
       jsx_factory: "React.createElement".into(),
       jsx_fragment_factory: "React.Fragment".into(),
       is_dev: false,
+      transpile_only: false,
       source_map: false,
     }
   }
@@ -113,21 +113,21 @@ impl ParsedModule {
     })
   }
 
-  /// Transform a JS/TS/JSX file into a JS file, based on the supplied options.
+  /// transform a JS/TS/JSX/TSX file into a JS file, based on the supplied options.
   ///
   /// ### Arguments
   ///
   /// - `resolver` - a resolver to resolve import/export url.
   /// - `options` - the options for emit code.
   ///
-  pub fn transpile(
+  pub fn transform(
     self,
     resolver: Rc<RefCell<Resolver>>,
     options: &EmitOptions,
   ) -> Result<(String, Option<String>), anyhow::Error> {
     swc_common::GLOBALS.set(&Globals::new(), || {
       let specifier_is_remote = resolver.borrow().specifier_is_remote;
-      let bundle_mode = resolver.borrow().bundle_mode;
+      let transpile_only = options.transpile_only;
       let is_ts = match self.source_type {
         SourceType::TypeScript => true,
         SourceType::TSX => true,
@@ -138,25 +138,24 @@ impl ParsedModule {
         SourceType::TSX => true,
         _ => false,
       };
-      let (aleph_jsx_fold, aleph_jsx_builtin_resolve_fold) = aleph_jsx_fold(
-        resolver.clone(),
-        self.source_map.clone(),
-        options.is_dev && !specifier_is_remote,
-      );
+      let (aleph_jsx_fold, aleph_jsx_builtin_resolve_fold) =
+        aleph_jsx_fold(resolver.clone(), self.source_map.clone(), options.is_dev);
       let root_mark = Mark::fresh(Mark::root());
       let mut passes = chain!(
-        aleph_resolve_fold(resolver.clone(), self.source_map.clone()),
-        Optional::new(aleph_jsx_fold, is_jsx),
-        Optional::new(aleph_jsx_builtin_resolve_fold, is_jsx),
-        Optional::new(jsx_link_fixer_fold(resolver.clone()), is_jsx && bundle_mode),
         Optional::new(
-          fast_refresh_fold(
+          aleph_resolve_fold(resolver.clone(), self.source_map.clone()),
+          !transpile_only
+        ),
+        Optional::new(aleph_jsx_fold, is_jsx && !transpile_only),
+        Optional::new(aleph_jsx_builtin_resolve_fold, is_jsx && !transpile_only),
+        Optional::new(
+          react_refresh_fold(
             "$RefreshReg$",
             "$RefreshSig$",
             false,
             self.source_map.clone()
           ),
-          options.is_dev && !specifier_is_remote
+          options.is_dev && !specifier_is_remote && !transpile_only
         ),
         Optional::new(
           react::jsx(
@@ -170,12 +169,15 @@ impl ParsedModule {
               ..Default::default()
             },
           ),
-          is_jsx
+          is_jsx && !transpile_only
         ),
-        decorators::decorators(decorators::Config {
-          legacy: true,
-          emit_metadata: false
-        }),
+        Optional::new(
+          decorators::decorators(decorators::Config {
+            legacy: true,
+            emit_metadata: false
+          }),
+          !transpile_only
+        ),
         Optional::new(es2020(), options.target < JscTarget::Es2020),
         Optional::new(strip(), is_ts),
         Optional::new(es2018(), options.target < JscTarget::Es2018),
@@ -301,14 +303,14 @@ mod tests {
       vec![],
     )));
     let (code, _) = module
-      .transpile(resolver.clone(), &EmitOptions::default())
-      .expect("could not transpile module");
+      .transform(resolver.clone(), &EmitOptions::default())
+      .expect("could not transform module");
     println!("{}", code);
     (code, resolver)
   }
 
   #[test]
-  fn test_transpile_ts() {
+  fn ts() {
     let source = r#"
       enum D {
         A,
@@ -344,7 +346,7 @@ mod tests {
   }
 
   #[test]
-  fn test_transpile_jsx() {
+  fn jsx() {
     let source = r#"
       import React from "https://esm.sh/react"
       export default function Index() {
@@ -363,7 +365,7 @@ mod tests {
   }
 
   #[test]
-  fn test_sign_use_deno() {
+  fn sign_use_deno_hook() {
     let specifer = "/pages/index.tsx";
     let source = r#"
       export default function Index() {
@@ -414,7 +416,7 @@ mod tests {
   }
 
   #[test]
-  fn test_transpile_jsx_builtin_tags() {
+  fn resolve_jsx_builtin_tags() {
     let source = r#"
       import React from "https://esm.sh/react"
       export default function Index() {
@@ -457,15 +459,14 @@ mod tests {
     assert!(code.contains("React.createElement(__ALEPH_Anchor,"));
     assert!(code.contains("React.createElement(__ALEPH_Head,"));
     assert!(code.contains("React.createElement(__ALEPH_Link,"));
+    assert!(code.contains("href: \"/style/index.css\""));
     assert!(code.contains(
       format!(
-        "href: \"../style/index.css.{}.js\"",
+        "__module: \"/style/index.css.{}.js\"",
         HASH_PLACEHOLDER.as_str()
       )
       .as_str()
     ));
-    assert!(code.contains("__url: \"/style/index.css\""));
-    assert!(code.contains("__base: \"/pages\""));
     assert!(code.contains("React.createElement(__ALEPH_Script,"));
     let r = resolver.borrow_mut();
     assert_eq!(
@@ -474,39 +475,33 @@ mod tests {
         DependencyDescriptor {
           specifier: "https://esm.sh/react".into(),
           is_dynamic: false,
-          rel: None,
         },
         DependencyDescriptor {
           specifier: "/style/index.css".into(),
           is_dynamic: true,
-          rel: Some("stylesheet".into()),
         },
         DependencyDescriptor {
           specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/head.ts".into(),
           is_dynamic: false,
-          rel: None,
         },
         DependencyDescriptor {
           specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/link.ts".into(),
           is_dynamic: false,
-          rel: None,
         },
         DependencyDescriptor {
           specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/anchor.ts".into(),
           is_dynamic: false,
-          rel: None,
         },
         DependencyDescriptor {
           specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/script.ts".into(),
           is_dynamic: false,
-          rel: None,
         }
       ]
     );
   }
 
   #[test]
-  fn test_transpile_inlie_style() {
+  fn resolve_inlie_style() {
     let source = r#"
       export default function Index() {
         const [color, setColor] = useState('white');
@@ -538,7 +533,16 @@ mod tests {
   }
 
   #[test]
-  fn test_transpile_bundling_import() {
+  fn resolve_import_meta_url() {
+    let source = r#"
+      console.log(import.meta.url)
+    "#;
+    let (code, _) = t("/pages/index.tsx", source, true);
+    assert!(code.contains("console.log(\"/pages/index.tsx\")"));
+  }
+
+  #[test]
+  fn bundling_import() {
     let source = r#"
       import React, { useState, useEffect as useEffect_ } from "https://esm.sh/react"
       import * as React_ from "https://esm.sh/react"
@@ -568,8 +572,8 @@ mod tests {
       vec!["/components/logo.ts".into(), "/shared/iife.ts".into()],
     )));
     let (code, _) = module
-      .transpile(resolver.clone(), &EmitOptions::default())
-      .expect("could not transpile module");
+      .transform(resolver.clone(), &EmitOptions::default())
+      .expect("could not transform module");
     println!("{}", code);
     assert!(code.contains("React = __ALEPH.pack[\"https://esm.sh/react\"].default"));
     assert!(code.contains("useState = __ALEPH.pack[\"https://esm.sh/react\"].useState"));
@@ -578,7 +582,6 @@ mod tests {
     assert!(code.contains("Logo = __ALEPH.pack[\"/components/logo.ts\"].default"));
     assert!(!code.contains("Nav = __ALEPH.pack[\"/components/nav.ts\"].default"));
     assert!(code.contains("import Nav from \""));
-    assert!(code.contains("import   \"../style/index.css.xxxxxxxxx.js\""));
     assert!(!code.contains("__ALEPH.pack[\"/shared/iife.ts\"]"));
     assert!(code.contains(
       "__ALEPH_Head = __ALEPH.pack[\"https://deno.land/x/aleph/framework/react/head.ts\"].default"
@@ -586,7 +589,7 @@ mod tests {
   }
 
   #[test]
-  fn test_transpile_bundling_export() {
+  fn bundling_export() {
     let source = r#"
       export {default as React, useState, useEffect as useEffect_ } from "https://esm.sh/react"
       export * as React_ from "https://esm.sh/react"

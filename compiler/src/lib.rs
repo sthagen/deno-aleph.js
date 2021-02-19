@@ -1,5 +1,3 @@
-// Copyright 2020-2021 postUI Lab. All rights reserved. MIT license.
-
 #[macro_use]
 extern crate lazy_static;
 
@@ -9,6 +7,7 @@ mod fixer;
 mod import_map;
 mod jsx;
 mod resolve;
+mod resolve_fold;
 mod source_type;
 mod swc;
 
@@ -25,13 +24,11 @@ use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Options {
-  pub url: String,
-
   #[serde(default)]
   pub import_map: ImportHashMap,
 
   #[serde(default)]
-  pub aleph_module_url: String,
+  pub aleph_pkg_uri: String,
 
   #[serde(default)]
   pub react_version: String,
@@ -40,7 +37,13 @@ pub struct Options {
   pub swc_options: SWCOptions,
 
   #[serde(default)]
+  pub source_map: bool,
+
+  #[serde(default)]
   pub is_dev: bool,
+
+  #[serde(default)]
+  pub transpile_only: bool,
 
   #[serde(default)]
   pub bundle_mode: bool,
@@ -52,6 +55,9 @@ pub struct Options {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SWCOptions {
+  #[serde(default)]
+  pub source_type: String,
+
   #[serde(default = "default_target")]
   pub target: JscTarget,
 
@@ -60,22 +66,15 @@ pub struct SWCOptions {
 
   #[serde(default = "default_pragma_frag")]
   pub jsx_fragment_factory: String,
-
-  #[serde(default)]
-  pub source_type: String,
-
-  #[serde(default)]
-  pub source_map: bool,
 }
 
 impl Default for SWCOptions {
   fn default() -> Self {
     SWCOptions {
+      source_type: "tsx".into(),
       target: default_target(),
       jsx_factory: default_pragma(),
       jsx_fragment_factory: default_pragma_frag(),
-      source_type: "".into(),
-      source_map: false,
     }
   }
 }
@@ -103,48 +102,48 @@ pub struct TransformOutput {
 }
 
 #[wasm_bindgen(js_name = "transformSync")]
-pub fn transform_sync(s: &str, opts: JsValue) -> Result<JsValue, JsValue> {
+pub fn transform_sync(url: &str, code: &str, options: JsValue) -> Result<JsValue, JsValue> {
   console_error_panic_hook::set_once();
 
-  let opts: Options = opts
+  let options: Options = options
     .into_serde()
     .map_err(|err| format!("failed to parse options: {}", err))
     .unwrap();
   let resolver = Rc::new(RefCell::new(Resolver::new(
-    opts.url.as_str(),
-    opts.import_map,
-    match opts.aleph_module_url.as_str() {
+    url,
+    options.import_map,
+    match options.aleph_pkg_uri.as_str() {
       "" => None,
-      _ => Some(opts.aleph_module_url),
+      _ => Some(options.aleph_pkg_uri),
     },
-    match opts.react_version.as_str() {
+    match options.react_version.as_str() {
       "" => None,
-      _ => Some(opts.react_version),
+      _ => Some(options.react_version),
     },
-    opts.bundle_mode,
-    opts.bundled_modules,
+    options.bundle_mode,
+    options.bundled_modules,
   )));
-  let specify_source_type = match opts.swc_options.source_type.as_str() {
+  let specify_source_type = match options.swc_options.source_type.as_str() {
     "js" => Some(SourceType::JavaScript),
     "jsx" => Some(SourceType::JSX),
     "ts" => Some(SourceType::TypeScript),
     "tsx" => Some(SourceType::TSX),
     _ => None,
   };
-  let module =
-    ParsedModule::parse(opts.url.as_str(), s, specify_source_type).expect("could not parse module");
+  let module = ParsedModule::parse(url, code, specify_source_type).expect("could not parse module");
   let (code, map) = module
-    .transpile(
+    .transform(
       resolver.clone(),
       &EmitOptions {
-        target: opts.swc_options.target,
-        jsx_factory: opts.swc_options.jsx_factory.clone(),
-        jsx_fragment_factory: opts.swc_options.jsx_fragment_factory.clone(),
-        source_map: opts.swc_options.source_map,
-        is_dev: opts.is_dev,
+        target: options.swc_options.target,
+        jsx_factory: options.swc_options.jsx_factory.clone(),
+        jsx_fragment_factory: options.swc_options.jsx_fragment_factory.clone(),
+        source_map: options.source_map,
+        is_dev: options.is_dev,
+        transpile_only: options.transpile_only,
       },
     )
-    .expect("could not transpile module");
+    .expect("could not transform module");
   let r = resolver.borrow_mut();
   Ok(
     JsValue::from_serde(&TransformOutput {

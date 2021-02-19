@@ -39,12 +39,12 @@ export default function Router({
   })
   const [route, setRoute] = useState<PageRoute>(pageRoute)
   const onpopstate = useCallback(async (e: any) => {
-    const { baseUrl } = routing
-    const [url, pageModuleChain] = routing.createRouter()
+    const { baseURL } = routing
+    const [url, nestedModules] = routing.createRouter()
     if (url.pagePath !== '') {
-      const imports = pageModuleChain.map(async mod => {
+      const imports = nestedModules.map(async mod => {
         const [{ default: Component }] = await Promise.all([
-          importModule(baseUrl, mod, e.forceRefetch),
+          importModule(baseURL, mod, e.forceRefetch),
           mod.hasData ? loadPageData(url) : Promise.resolve(),
         ])
         return {
@@ -73,11 +73,11 @@ export default function Router({
 
   useEffect(() => {
     const isDev = !('__ALEPH' in window)
-    const { baseUrl } = routing
+    const { baseURL } = routing
     const onAddModule = async (mod: RouteModule) => {
       switch (mod.url) {
         case '/404.js': {
-          const { default: Component } = await importModule(baseUrl, mod, true)
+          const { default: Component } = await importModule(baseURL, mod, true)
           if (isLikelyReactComponent(Component)) {
             setE404({ Component })
           } else {
@@ -86,7 +86,7 @@ export default function Router({
           break
         }
         case '/app.js': {
-          const { default: Component } = await importModule(baseUrl, mod, true)
+          const { default: Component } = await importModule(baseURL, mod, true)
           if (isLikelyReactComponent(Component)) {
             setApp({ Component })
           } else {
@@ -121,13 +121,13 @@ export default function Router({
     }
     const onFetchPageModule = async ({ href }: { href: string }) => {
       const [pathname, search] = href.split('?')
-      const [url, pageModuleChain] = routing.createRouter({ pathname, search })
+      const [url, nestedModules] = routing.createRouter({ pathname, search })
       if (url.pagePath !== '') {
-        pageModuleChain.map(mod => {
+        nestedModules.map(mod => {
           if (mod.hasData) {
             loadPageData(url)
           }
-          importModule(baseUrl, mod)
+          importModule(baseURL, mod)
         })
       }
     }

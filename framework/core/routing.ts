@@ -20,34 +20,34 @@ export type RouteModule = {
 export type RoutingOptions = {
   routes?: Route[]
   rewrites?: Record<string, string>
-  baseUrl?: string
+  baseURL?: string
   defaultLocale?: string
   locales?: string[]
 }
 
 export class Routing {
-  private _baseUrl: string
+  private _baseURL: string
   private _defaultLocale: string
   private _locales: string[]
   private _routes: Route[]
   private _rewrites: Record<string, string>
 
   constructor({
-    baseUrl = '/',
+    baseURL = '/',
     defaultLocale = 'en',
     locales = [],
     routes = [],
-    rewrites = {},
+    rewrites = {}
   }: RoutingOptions) {
-    this._baseUrl = baseUrl
+    this._baseURL = baseURL
     this._defaultLocale = defaultLocale
     this._locales = locales
     this._routes = routes
     this._rewrites = rewrites
   }
 
-  get baseUrl() {
-    return this._baseUrl
+  get baseURL() {
+    return this._baseURL
   }
 
   get paths() {
@@ -118,13 +118,13 @@ export class Routing {
 
   createRouter(location?: { pathname: string, search?: string }): [RouterURL, RouteModule[]] {
     const loc = location || (window as any).location || { pathname: '/' }
-    const url = rewriteURL(loc.pathname + (loc.search || ''), this._baseUrl, this._rewrites)
+    const url = rewriteURL(loc.pathname + (loc.search || ''), this._baseURL, this._rewrites)
 
     let locale = this._defaultLocale
     let pathname = decodeURI(url.pathname)
     let pagePath = ''
     let params: Record<string, string> = {}
-    let chain: RouteModule[] = []
+    let nestedModules: RouteModule[] = []
 
     if (pathname !== '/' && this._locales.length > 0) {
       const a = pathname.split('/')
@@ -139,10 +139,10 @@ export class Routing {
       const path = routePath.map(r => r.path).join('')
       const [p, ok] = matchPath(path, pathname)
       if (ok) {
-        chain = routePath.map(r => r.module)
+        nestedModules = routePath.map(r => r.module)
         const c = routePath[routePath.length - 1].children?.find(c => c.path === '/')
         if (c) {
-          chain.push(c.module)
+          nestedModules.push(c.module)
         }
         pagePath = path
         params = p
@@ -150,7 +150,19 @@ export class Routing {
       }
     }, true)
 
-    return [{ locale, pathname, pagePath, params, query: url.searchParams }, chain]
+    return [
+      {
+        baseURL: this._baseURL,
+        locale,
+        pathname,
+        pagePath,
+        params,
+        query: url.searchParams,
+        push: (url: string) => redirect(url),
+        replace: (url: string) => redirect(url, true),
+      },
+      nestedModules
+    ]
   }
 
   lookup(callback: (path: Route[]) => Boolean | void) {
@@ -159,21 +171,21 @@ export class Routing {
 
   private _lookup(
     callback: (path: Route[]) => Boolean | void,
-    skipNestIndex = false,
-    _tracing: Route[] = [],
-    _routes = this._routes
+    skipNestedIndex = false,
+    __tracing: Route[] = [],
+    __routes = this._routes
   ) {
-    for (const route of _routes) {
-      if (skipNestIndex && _tracing.length > 0 && route.path === '/') {
+    for (const route of __routes) {
+      if (skipNestedIndex && __tracing.length > 0 && route.path === '/') {
         continue
       }
-      if (callback([..._tracing, route]) === false) {
+      if (callback([...__tracing, route]) === false) {
         return false
       }
     }
-    for (const route of _routes) {
+    for (const route of __routes) {
       if (route.path !== '/' && route.children?.length) {
-        if (this._lookup(callback, skipNestIndex, [..._tracing, route], route.children) === false) {
+        if (this._lookup(callback, skipNestedIndex, [...__tracing, route], route.children) === false) {
           return false
         }
       }
@@ -212,11 +224,24 @@ function matchPath(routePath: string, locPath: string): [Record<string, string>,
   return [params, true]
 }
 
+export function createBlankRouterURL(locale = 'en'): RouterURL {
+  return {
+    baseURL: '/',
+    locale,
+    pagePath: '',
+    pathname: '/',
+    params: {},
+    query: new URLSearchParams(),
+    push: () => void 0,
+    replace: () => void 0,
+  }
+}
+
 /** `rewriteURL` returns a rewrited URL */
-export function rewriteURL(reqUrl: string, baseUrl: string, rewrites: Record<string, string>): URL {
+export function rewriteURL(reqUrl: string, baseURL: string, rewrites: Record<string, string>): URL {
   const url = new URL('http://localhost' + reqUrl)
-  if (baseUrl !== '/') {
-    url.pathname = util.trimPrefix(decodeURI(url.pathname), baseUrl)
+  if (baseURL !== '/') {
+    url.pathname = util.trimPrefix(decodeURI(url.pathname), baseURL)
   }
   for (const path in rewrites) {
     const to = rewrites[path]

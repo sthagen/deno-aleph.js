@@ -1,5 +1,3 @@
-// Copyright 2020 the Aleph.js authors. All rights reserved. MIT license.
-
 use indexmap::IndexMap;
 use path_slash::PathBufExt;
 use relative_path::RelativePath;
@@ -114,7 +112,7 @@ mod tests {
   use super::*;
 
   #[test]
-  fn test_import_maps() {
+  fn resolve_import_maps() {
     let mut imports: SpecifierHashMap = HashMap::new();
     let mut scopes: HashMap<String, SpecifierHashMap> = HashMap::new();
     let mut scope_imports: SpecifierHashMap = HashMap::new();

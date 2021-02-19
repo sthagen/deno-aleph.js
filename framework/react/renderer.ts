@@ -4,7 +4,7 @@ import { renderToString } from 'https://esm.sh/react-dom/server'
 import util from '../../shared/util.ts'
 import type { RouterURL } from '../../types.ts'
 import events from '../core/events.ts'
-import { serverStyles } from "../core/style.ts"
+import { serverStyles } from '../core/style.ts'
 import { RouterContext, SSRContext } from './context.ts'
 import { AsyncUseDenoError, E400MissingComponent, E404Page } from './error.ts'
 import { isLikelyReactComponent } from './helper.ts'
@@ -17,11 +17,17 @@ type RenderResult = {
   data: Record<string, string> | null
 }
 
+export type RendererStorage = {
+  styleLinks: Map<string, { module: string }>
+  headElements: Map<string, { type: string, props: Record<string, any> }>
+  scriptElements: Map<string, { props: Record<string, any> }>
+}
+
 export async function render(
   url: RouterURL,
   App: ComponentType<any> | undefined,
   E404: ComponentType | undefined,
-  pageComponentChain: { url: string, Component?: any }[]
+  nestedPageComponents: { url: string, Component?: any }[]
 ): Promise<RenderResult> {
   const global = globalThis as any
   const ret: RenderResult = {
@@ -31,13 +37,15 @@ export async function render(
     data: null,
   }
   const buildMode = Deno.env.get('BUILD_MODE')
-  const styleLinks: Map<string, { module: string }> = new Map()
-  const headElements: Map<string, { type: string, props: Record<string, any> }> = new Map()
-  const scriptElements: Map<string, { props: Record<string, any> }> = new Map()
+  const rendererStorage: RendererStorage = {
+    styleLinks: new Map(),
+    headElements: new Map(),
+    scriptElements: new Map(),
+  }
   const dataUrl = 'data://' + url.pathname
   const asyncCalls: Array<Promise<any>> = []
   const data: Record<string, any> = {}
-  const pageProps = createPageProps(pageComponentChain)
+  const pageProps = createPageProps(nestedPageComponents)
   const defer = () => {
     delete global['rendering-' + dataUrl]
     events.removeAllListeners('useDeno-' + dataUrl)
@@ -86,7 +94,7 @@ export async function render(
       }
       ret.body = renderToString(createElement(
         SSRContext.Provider,
-        { value: { styleLinks, headElements, scriptElements } },
+        { value: rendererStorage },
         createElement(
           RouterContext.Provider,
           { value: url },
@@ -108,7 +116,7 @@ export async function render(
   }
 
   // get head child tags
-  headElements.forEach(({ type, props }) => {
+  rendererStorage.headElements.forEach(({ type, props }) => {
     const { children, ...rest } = props
     if (type === 'title') {
       if (util.isNEString(children)) {
@@ -131,7 +139,7 @@ export async function render(
   })
 
   // get script tags
-  scriptElements.forEach(({ props }) => {
+  rendererStorage.scriptElements.forEach(({ props }) => {
     const { children, dangerouslySetInnerHTML, ...attrs } = props
     if (dangerouslySetInnerHTML && util.isNEString(dangerouslySetInnerHTML.__html)) {
       ret.scripts.push({ ...attrs, innerText: dangerouslySetInnerHTML.__html })
@@ -145,7 +153,7 @@ export async function render(
   })
 
   // get styles
-  await Promise.all(Array.from(styleLinks.values()).map(async ({ module }) => {
+  await Promise.all(Array.from(rendererStorage.styleLinks.values()).map(async ({ module }) => {
     await import('file://' + util.cleanPath(`${Deno.cwd()}/.aleph/${buildMode}/${module}`))
   }))
   serverStyles.forEach((css, url) => {

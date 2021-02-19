@@ -1,5 +1,3 @@
-// Copyright 2020 the Aleph.js authors. All rights reserved. MIT license.
-
 use indexmap::IndexSet;
 use sha1::{Digest, Sha1};
 use std::rc::Rc;
@@ -8,13 +6,13 @@ use swc_ecma_ast::*;
 use swc_ecma_utils::{private_ident, quote_ident};
 use swc_ecma_visit::{noop_fold_type, Fold};
 
-pub fn fast_refresh_fold(
+pub fn react_refresh_fold(
   refresh_reg: &str,
   refresh_sig: &str,
   emit_full_signatures: bool,
   source: Rc<SourceMap>,
 ) -> impl Fold {
-  FastRefreshFold {
+  ReactRefreshFold {
     source,
     signature_index: 0,
     registration_index: 0,
@@ -26,10 +24,10 @@ pub fn fast_refresh_fold(
   }
 }
 
-/// aleph.js fast-refresh fold.
+/// react refresh fold.
 ///
 /// @ref https://github.com/facebook/react/blob/master/packages/react-refresh/src/ReactFreshBabelPlugin.js
-pub struct FastRefreshFold {
+pub struct ReactRefreshFold {
   source: Rc<SourceMap>,
   signature_index: u32,
   registration_index: u32,
@@ -55,7 +53,7 @@ struct HookCall {
   is_builtin: bool,
 }
 
-impl FastRefreshFold {
+impl ReactRefreshFold {
   fn create_registration_handle_ident(&mut self) -> Ident {
     let mut registration_handle_name = String::from("_c");
     self.registration_index += 1;
@@ -632,7 +630,7 @@ impl FastRefreshFold {
   }
 }
 
-impl Fold for FastRefreshFold {
+impl Fold for ReactRefreshFold {
   noop_fold_type!();
 
   fn fold_module_items(&mut self, module_items: Vec<ModuleItem>) -> Vec<ModuleItem> {
@@ -1036,7 +1034,7 @@ mod tests {
     let (code, _) = swc_common::GLOBALS.set(&Globals::new(), || {
       module
         .apply_transform(
-          fast_refresh_fold(
+          react_refresh_fold(
             "$RefreshReg$",
             "$RefreshSig$",
             true,
@@ -1065,7 +1063,7 @@ mod tests {
   }
 
   #[test]
-  fn test_fast_refresh() {
+  fn fast_refresh() {
     let source = r#"
     function Hello() {
       return <h1>Hi</h1>;
@@ -1118,7 +1116,7 @@ $RefreshReg$(_c4, "App");
   }
 
   #[test]
-  fn test_fast_refresh_custom_hooks() {
+  fn fast_refresh_custom_hooks() {
     let source = r#"
     const useFancyEffect = () => {
       React.useEffect(() => { });
@@ -1177,7 +1175,7 @@ $RefreshReg$(_c, "App");
   }
 
   #[test]
-  fn test_fast_refresh_exotic_signature() {
+  fn fast_refresh_exotic_signature() {
     let source = r#"
     import FancyHook from 'fancy';
 
@@ -1239,7 +1237,7 @@ $RefreshReg$(_c, "App");
   }
 
   #[test]
-  fn test_fast_refresh_hocs() {
+  fn fast_refresh_hocs() {
     let source = r#"
     const A = forwardRef(function() {
       return <h1>Foo</h1>;
@@ -1343,7 +1341,7 @@ $RefreshReg$(_c18, "%default%");
   }
 
   #[test]
-  fn test_fast_refresh_ignored() {
+  fn fast_refresh_ignored() {
     let source = r#"
     const NotAComp = 'hi';
     export { Baz, NotAComp };
