@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.86.0/testing/asserts.ts'
+import { assertEquals } from 'https://deno.land/std@0.88.0/testing/asserts.ts'
 import cssLoader from './css.ts'
 
 Deno.test('css loader', async () => {
@@ -28,7 +28,6 @@ Deno.test('css loader in production mode', async () => {
 
 Deno.test('css loader with postcss plugins', async () => {
   const loader = cssLoader({ postcss: { plugins: ['postcss-nested'] } })
-  await loader.init!()
   const { code } = await loader.transform({
     url: '/test.css',
     content: (new TextEncoder).encode('.foo { .bar { font-size: 100%; } }'),

@@ -14,7 +14,7 @@ export type Route = {
 export type RouteModule = {
   readonly url: string
   readonly hash: string
-  readonly hasData?: boolean
+  readonly useDeno?: boolean
 }
 
 export type RoutingOptions = {
@@ -59,6 +59,12 @@ export class Routing {
   // routes returns the routes as copy
   get routes(): Route[] {
     return JSON.parse(JSON.stringify(this._routes))
+  }
+
+  config(options: RoutingOptions) {
+    Object.keys(options).forEach((key) => {
+      Object.assign(this, { ['_' + key]: options[key as keyof typeof options] })
+    })
   }
 
   update(module: RouteModule) {

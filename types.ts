@@ -1,15 +1,6 @@
 import type { BufReader, BufWriter, MultipartFormData } from './deps.ts'
 
 /**
- * The result of loader transform.
- */
-export type LoaderTransformResult = {
-  code: string,
-  map?: string
-  loader?: string
-}
-
-/**
  * A loader plugin to load source media.
  */
 export type LoaderPlugin = {
@@ -23,10 +14,17 @@ export type LoaderPlugin = {
   acceptHMR?: boolean
   /** `allowPage` allows the loaded module as a page. */
   allowPage?: boolean
-  /** `init` initiates the plugin. */
-  init?(): Promise<void>
   /** `transform` transforms the source content. */
   transform(source: { url: string, content: Uint8Array, map?: Uint8Array }): LoaderTransformResult | Promise<LoaderTransformResult>
+}
+
+/**
+ * The result of loader transform.
+ */
+export type LoaderTransformResult = {
+  code: string,
+  map?: string
+  loader?: string
 }
 
 /**
@@ -37,7 +35,7 @@ export type ServerPlugin = {
   name: string
   /** `type` specifies the plugin type. */
   type: 'server'
-  /** `onInit` invokes when the server initiated. */
+  /** `onInit` will be invoked after the server initiated. */
   onInit(app: ServerApplication): Promise<void> | void
 }
 
@@ -47,25 +45,11 @@ export type ServerPlugin = {
 export type Plugin = LoaderPlugin | ServerPlugin
 
 /**
- * The options for **SSR**.
- */
-export type SSROptions = {
-  /** A list of RegExp for paths to use **SSR**. */
-  include?: RegExp[]
-  /** A list of RegExp for paths to skip **SSR**. */
-  exclude?: RegExp[]
-  /** A list of paths for **dynamic routes** in **SSG**. */
-  staticPaths?: string[]
-}
-
-/**
  * The config for the aleph server application.
  */
 export type Config = {
   /** `framework` specifies the framework (default is 'react'). */
   framework?: 'react'
-  /** `reactVersion` specifies the react version (default is '17.0.1'). */
-  reactVersion?: string
   /** `buildTarget` specifies the build target in production mode (default is **es5** to be compatible with IE11). */
   buildTarget?: 'es5' | 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020'
   /** `baseUrl` specifies the path prefix for the application (default is '/'). */
@@ -91,14 +75,40 @@ export type Config = {
 }
 
 /**
+ * The options for **SSR**.
+ */
+export type SSROptions = {
+  /** A list of RegExp for paths to use **SSR**. */
+  include?: RegExp[]
+  /** A list of RegExp for paths to skip **SSR**. */
+  exclude?: RegExp[]
+  /** A list of paths for **dynamic routes** in **SSG**. */
+  staticPaths?: string[]
+}
+
+/**
  * An interface that aligns to the parts of the aleph server's `Application`.
  */
-interface ServerApplication {
+export interface ServerApplication {
   readonly workingDir: string
   readonly mode: 'development' | 'production'
   readonly config: Required<Config>
-  addPageModule(pathname: string, code: string): Promise<void>
-  removePageModule(pathname: string): Promise<void>
+  addModule(url: string, options?: ModuleOptions): Promise<void>
+  injectCode(stage: 'compilation' | 'hmr', transform: TransformFn): void
+}
+
+export type TransformFn = {
+  (url: string, code: string): string
+}
+
+/**
+ * The module options.
+ */
+export type ModuleOptions = {
+  code?: string
+  asAPI?: boolean
+  asPage?: boolean
+  pathname?: string
 }
 
 /**

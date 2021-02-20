@@ -2,13 +2,12 @@ import { colors, createHash, path } from '../deps.ts'
 import { existsDirSync } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
-import type { ServerRequest } from '../types.ts'
 import { VERSION } from '../version.ts'
 
 export const reLocaleID = /^[a-z]{2}(-[a-zA-Z0-9]+)?$/
 export const reFullVersion = /@v?\d+\.\d+\.\d+/i
 export const reHashJs = /\.[0-9a-fx]{9}\.js$/i
-export const reHashResolve = /[^a-z0-9\$_](import|import\s*\(|from|__module\s*:)(\s*)("|')([^'"]+\.[0-9a-fx]{9}\.js)("|')/g
+export const reHashResolve = /((?:[^a-z0-9\$_\.])import|import\s*\(|from|__module\s*:)(\s*)("|')([^'"]+\.[0-9a-fx]{9}\.js)("|')/g
 
 // inject browser navigator polyfill
 Object.assign(globalThis, {
@@ -33,23 +32,6 @@ Object.assign(globalThis, {
 export const AlephRuntimeCode = `
   var __ALEPH = window.__ALEPH || (window.__ALEPH = {
     pack: {},
-    exportFrom: function(specifier, url, exports) {
-      if (url in this.pack) {
-        var mod = this.pack[url]
-        if (!(specifier in this.pack)) {
-          this.pack[specifier] = {}
-        }
-        if (exports === '*') {
-          for (var k in mod) {
-            this.pack[specifier][k] = mod[k]
-          }
-        } else if (typeof exports === 'object' && exports !== null) {
-          for (var k in exports) {
-            this.pack[specifier][exports[k]] = mod[k]
-          }
-        }
-      }
-    },
     require: function(name) {
       switch (name) {
       case 'regenerator-runtime':
@@ -77,6 +59,26 @@ export function getRelativePath(from: string, to: string): string {
     r = './' + r
   }
   return r
+}
+
+/** fix remote import url to local */
+export function toLocalUrl(url: string): string {
+  const isRemote = util.isLikelyHttpURL(url)
+  if (isRemote) {
+    let { hostname, pathname, port, protocol, searchParams } = new URL(url)
+    let search = Array.from(searchParams.entries()).map(([key, value]) => value ? `${key}=${value}` : key)
+    if (search.length > 0) {
+      pathname += '_' + search.join(',')
+    }
+    return [
+      '/-/',
+      (protocol === 'http:' ? 'http_' : ''),
+      hostname,
+      (port ? '_' + port : ''),
+      pathname
+    ].join('')
+  }
+  return url
 }
 
 /** compute hash of the content */
@@ -111,11 +113,13 @@ export function parsePortNumber(v: string): number {
   return num
 }
 
-/** get flag */
-export function getFlag(flags: Record<string, string | boolean>, keys: string[], defaultValue?: string): string {
-  let value = defaultValue || ''
+/** get flag value by given keys. */
+export function getFlag(flags: Record<string, any>, keys: string[]): string | undefined
+export function getFlag(flags: Record<string, any>, keys: string[], defaultValue: string): string
+export function getFlag(flags: Record<string, any>, keys: string[], defaultValue?: string): string | undefined {
+  let value = defaultValue
   for (const key of keys) {
-    if (key in flags && util.isNEString(flags[key])) {
+    if (key in flags) {
       value = String(flags[key])
       break
     }
@@ -137,15 +141,6 @@ export function formatBytesWithColor(bytes: number) {
     cf = colors.yellow
   }
   return cf(util.formatBytes(bytes))
-}
-
-/** Reponse an error jons to the request */
-export function respondErrorJSON(req: ServerRequest, status: number, message: string) {
-  req.respond({
-    status,
-    headers: new Headers({ 'Content-Type': 'application/json; charset=utf-8' }),
-    body: JSON.stringify({ error: { status, message } })
-  }).catch((err: Error) => log.warn('ServerRequest.respond:', err.message))
 }
 
 /** create html content by given arguments */
