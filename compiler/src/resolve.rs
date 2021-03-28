@@ -14,13 +14,12 @@ use std::{
 use url::Url;
 
 lazy_static! {
-  pub static ref HASH_PLACEHOLDER: String = "x".repeat(9);
   pub static ref RE_ENDS_WITH_VERSION: Regex = Regex::new(
     r"@\d+(\.\d+){0,2}(\-[a-z0-9]+(\.[a-z0-9]+)?)?$"
   )
   .unwrap();
   pub static ref RE_REACT_URL: Regex = Regex::new(
-    r"^https?://(esm.sh/|cdn.esm.sh/v\d+/|esm.x-static.io/v\d+/|jspm.dev/|cdn.skypack.dev/|jspm.dev/npm:|esm.run/)react(\-dom)?(@[\^|~]{0,1}[0-9a-z\.\-]+)?([/|\?].*)?$"
+    r"^https?://(esm.sh/|cdn.esm.sh/v\d+/|cdn.esm.sh.cn/v\d+/|esm.x-static.io/v\d+/)react(\-dom)?(@[\^|~]{0,1}[0-9a-z\.\-]+)?([/|\?].*)?$"
   )
   .unwrap();
 }
@@ -46,8 +45,6 @@ pub struct Resolver {
   pub specifier: String,
   /// a flag indicating if the specifier is remote url or not.
   pub specifier_is_remote: bool,
-  /// builtin jsx tags like `a`, `link`, `head`, etc
-  pub used_builtin_jsx_tags: IndexSet<String>,
   /// dependency graph
   pub dep_graph: Vec<DependencyDescriptor>,
   /// inline styles
@@ -55,9 +52,13 @@ pub struct Resolver {
   /// bundle mode
   pub bundle_mode: bool,
   /// bundled modules
-  pub bundled_modules: IndexSet<String>,
+  pub bundle_external: IndexSet<String>,
+  /// star exports
+  pub star_exports: Vec<String>,
   /// extra imports
   pub extra_imports: IndexSet<String>,
+  /// builtin jsx tags like `a`, `link`, `head`, etc
+  pub used_builtin_jsx_tags: IndexSet<String>,
 
   // private
   import_map: ImportMap,
@@ -72,10 +73,10 @@ impl Resolver {
     aleph_pkg_uri: Option<String>,
     react_version: Option<String>,
     bundle_mode: bool,
-    bundled_modules: Vec<String>,
+    bundle_external: Vec<String>,
   ) -> Self {
     let mut set = IndexSet::<String>::new();
-    for url in bundled_modules {
+    for url in bundle_external {
       set.insert(url);
     }
     Resolver {
@@ -83,12 +84,13 @@ impl Resolver {
       specifier_is_remote: is_remote_url(specifier),
       used_builtin_jsx_tags: IndexSet::new(),
       dep_graph: Vec::new(),
+      star_exports: Vec::new(),
       inline_styles: HashMap::new(),
       import_map: ImportMap::from_hashmap(import_map),
       aleph_pkg_uri,
       react_version,
       bundle_mode,
-      bundled_modules: set,
+      bundle_external: set,
       extra_imports: IndexSet::new(),
     }
   }
@@ -106,13 +108,10 @@ impl Resolver {
 
   /// fix import/export url.
   //  - `https://esm.sh/react` -> `/-/esm.sh/react.js`
-  //  - `https://esm.sh/react@17.0.1?target=es2015&dev` -> `/-/esm.sh/react@17.0.1_target=es2015&dev.js`
+  //  - `https://esm.sh/react@17.0.1?target=es2015&dev` -> `/-/esm.sh/[base64('target=es2015&dev')]react@17.0.1.js`
   //  - `http://localhost:8080/mod` -> `/-/http_localhost_8080/mod.js`
-  //  - `/components/logo.tsx` -> `/components/logo.tsx`
-  //  - `../components/logo.tsx` -> `../components/logo.tsx`
-  //  - `./button.tsx` -> `./button.tsx`
-  //  - `/components/foo/./logo.tsx` -> `/components/foo/logo.tsx`
-  //  - `/components/foo/../logo.tsx` -> `/components/logo.tsx`
+  //  - `/components/x/./logo.tsx` -> `/components/x/logo.tsx`
+  //  - `/components/x/../logo.tsx` -> `/components/logo.tsx`
   pub fn fix_import_url(&self, url: &str) -> String {
     let is_remote = is_remote_url(url);
     if !is_remote {
@@ -149,35 +148,40 @@ impl Resolver {
       },
       None => "js",
     });
-    match path.file_name() {
-      Some(os_str) => match os_str.to_str() {
-        Some(s) => {
-          let mut file_name = s.trim_end_matches(ext.as_str()).to_owned();
-          match url.query() {
-            Some(q) => {
-              file_name.push('_');
-              file_name.push_str(q);
-            }
-            _ => {}
-          };
-          file_name.push_str(ext.as_str());
-          path_buf.set_file_name(file_name);
+    if let Some(os_str) = path.file_name() {
+      if let Some(s) = os_str.to_str() {
+        let mut file_name = "".to_owned();
+        if let Some(q) = url.query() {
+          file_name.push('[');
+          file_name.push_str(
+            base64::encode(q)
+              .replace("+", "")
+              .replace("/", "")
+              .replace("=", "")
+              .as_str(),
+          );
+          file_name.push(']');
         }
-        _ => {}
-      },
-      _ => {}
-    };
+        file_name.push_str(s);
+        if !file_name.ends_with(ext.as_str()) {
+          file_name.push_str(ext.as_str());
+        }
+        path_buf.set_file_name(file_name);
+      }
+    }
     let mut p = "/-/".to_owned();
-    if url.scheme() == "http" {
+    let scheme = url.scheme();
+    if scheme == "http" {
       p.push_str("http_");
     }
     p.push_str(url.host_str().unwrap());
-    match url.port() {
-      Some(port) => {
+    if let Some(port) = url.port() {
+      if scheme == "http" && port == 80 {
+      } else if scheme == "https" && port == 443 {
+      } else {
         p.push('_');
         p.push_str(port.to_string().as_str());
       }
-      _ => {}
     }
     p.push_str(path_buf.to_str().unwrap());
     p
@@ -185,13 +189,11 @@ impl Resolver {
 
   /// resolve import/export url.
   // [/pages/index.tsx]
-  // - `https://esm.sh/swr` -> `/-/esm.sh/swr.js`
-  // - `https://esm.sh/react` -> `/-/esm.sh/react@${REACT_VERSION}.js`
-  // - `https://deno.land/x/aleph/mod.ts` -> `/-/deno.land/x/aleph@v${CURRENT_ALEPH_VERSION}/mod.ts`
-  // - `../components/logo.tsx` -> `/components/logo.{HASH}.js`
-  // - `../styles/app.css` -> `/styles/app.css.{HASH}.js`
-  // - `@/components/logo.tsx` -> `/components/logo.{HASH}.js`
-  // - `~/components/logo.tsx` -> `/components/logo.{HASH}.js`
+  // - `https://esm.sh/swr` -> `../-/esm.sh/swr.js`
+  // - `https://esm.sh/react` -> `../-/esm.sh/react@${REACT_VERSION}.js`
+  // - `https://deno.land/x/aleph/mod.ts` -> `../-/deno.land/x/aleph@v${ALEPH_VERSION}/mod.ts`
+  // - `../components/logo.tsx` -> `../components/logo.js#/components/logo.tsx@000000`
+  // - `../styles/app.css` -> `../styles/app.css.js#/styles/app.css@000000`
   pub fn resolve(&mut self, url: &str, is_dynamic: bool) -> (String, String) {
     // apply import map
     let url = self.import_map.resolve(self.specifier.as_str(), url);
@@ -216,10 +218,6 @@ impl Resolver {
       } else {
         if url.starts_with("/") {
           url.into()
-        } else if url.starts_with("@/") {
-          url.trim_start_matches("@").into()
-        } else if url.starts_with("~/") {
-          url.trim_start_matches("~").into()
         } else {
           let mut buf = PathBuf::from(self.specifier.as_str());
           buf.pop();
@@ -323,26 +321,34 @@ impl Resolver {
               .unwrap()
               .trim_end_matches(s)
               .to_owned();
-            if !is_remote && !self.specifier_is_remote {
-              filename.push_str(HASH_PLACEHOLDER.as_str());
-              filename.push('.');
+            if self.bundle_mode && !is_dynamic {
+              filename.push_str("bundling.");
             }
             filename.push_str("js");
+            if !is_remote && !self.specifier_is_remote {
+              filename.push_str("#");
+              filename.push_str(fixed_url.as_str());
+              filename.push_str("@000000");
+            }
             resolved_path.set_file_name(filename);
           }
           _ => {
-            if !is_remote && !self.specifier_is_remote {
-              let mut filename = resolved_path
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
-              filename.push('.');
-              filename.push_str(HASH_PLACEHOLDER.as_str());
-              filename.push_str(".js");
-              resolved_path.set_file_name(filename);
+            let mut filename = resolved_path
+              .file_name()
+              .unwrap()
+              .to_str()
+              .unwrap()
+              .to_owned();
+            if self.bundle_mode && !is_dynamic {
+              filename.push_str(".bundling");
             }
+            filename.push_str(".js");
+            if !is_remote && !self.specifier_is_remote {
+              filename.push('#');
+              filename.push_str(fixed_url.as_str());
+              filename.push_str("@000000");
+            }
+            resolved_path.set_file_name(filename);
           }
         },
         None => {}
@@ -387,7 +393,7 @@ mod tests {
     );
     assert_eq!(
       resolver.fix_import_url("https://esm.sh/react@17.0.1?target=es2015&dev"),
-      "/-/esm.sh/react@17.0.1_target=es2015&dev.js"
+      "/-/esm.sh/[dGFyZ2V0PWVzMjAxNSZkZXY]react@17.0.1.js"
     );
     assert_eq!(
       resolver.fix_import_url("http://localhost:8080/mod"),
@@ -518,28 +524,35 @@ mod tests {
     assert_eq!(
       resolver.resolve("../components/logo.tsx", false),
       (
-        format!("../components/logo.{}.js", HASH_PLACEHOLDER.as_str()),
+        "../components/logo.js#/components/logo.tsx@000000".into(),
         "/components/logo.tsx".into()
       )
     );
     assert_eq!(
       resolver.resolve("../styles/app.css", false),
       (
-        format!("../styles/app.css.{}.js", HASH_PLACEHOLDER.as_str()),
+        "../styles/app.css.js#/styles/app.css@000000".into(),
         "/styles/app.css".into()
+      )
+    );
+    assert_eq!(
+      resolver.resolve("https://esm.sh/tailwindcss/dist/tailwind.min.css", false),
+      (
+        "../-/esm.sh/tailwindcss/dist/tailwind.min.css.js".into(),
+        "https://esm.sh/tailwindcss/dist/tailwind.min.css".into()
       )
     );
     assert_eq!(
       resolver.resolve("@/components/logo.tsx", false),
       (
-        format!("../components/logo.{}.js", HASH_PLACEHOLDER.as_str()),
+        "../components/logo.js#/components/logo.tsx@000000".into(),
         "/components/logo.tsx".into()
       )
     );
     assert_eq!(
       resolver.resolve("~/components/logo.tsx", false),
       (
-        format!("../components/logo.{}.js", HASH_PLACEHOLDER.as_str()),
+        "../components/logo.js#/components/logo.tsx@000000".into(),
         "/components/logo.tsx".into()
       )
     );

@@ -1,4 +1,5 @@
-import { ensureDir, path } from '../deps.ts'
+import { dirname } from 'https://deno.land/std@0.90.0/path/mod.ts'
+import { ensureDir } from 'https://deno.land/std@0.90.0/fs/ensure_dir.ts'
 
 /* check whether or not the given path exists as a directory. */
 export async function existsDir(path: string): Promise<boolean> {
@@ -66,15 +67,15 @@ export function existsFileSync(path: string) {
 
 /** ensure and write a text file. */
 export async function ensureTextFile(name: string, content: string): Promise<void> {
-  const dir = path.dirname(name)
+  const dir = dirname(name)
   await ensureDir(dir)
   await Deno.writeTextFile(name, content)
 }
 
 /** remove the file if it exists. */
-export async function lazyRemove(name: string): Promise<void> {
+export async function lazyRemove(name: string, options?: { recursive?: boolean }): Promise<void> {
   try {
-    await Deno.remove(name)
+    await Deno.remove(name, options)
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) {
       return

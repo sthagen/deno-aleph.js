@@ -10,7 +10,7 @@ Welcome, and thank you for taking time in contributing to Aleph.js! You can impr
 
 ## Development Setup
 
-You will need [Deno](https://deno.land/) 1.7+.
+You will need [Deno](https://deno.land/) 1.8+.
 
 1. Fork this repository to your own GitHub account.
 2. Clone the repository to your local device.
@@ -21,20 +21,17 @@ You will need [Deno](https://deno.land/) 1.7+.
 7. Marge to master branch by our maintainers.
 
 ```bash
-# set dev env
-echo 'ALEPH_DEV_PORT=2021' > .local.env
-
 # ssr/development with HMR
-deno run -A cli.ts dev ./examples/hello-world -L debug
+ALEPH_DEV=true deno run -A --unstable --location=http://localhost cli.ts dev ./examples/hello-world -L debug
 
 # ssr/production
-deno run -A cli.ts start ./examples/hello-world -L debug
+ALEPH_DEV=true deno run -A --unstable --location=http://localhost cli.ts start ./examples/hello-world -L debug
 
 # ssg
-deno run -A cli.ts build ./examples/hello-world -L debug
+ALEPH_DEV=true deno run -A --unstable --location=http://localhost cli.ts build ./examples/hello-world -L debug
 
 # run all tests
-deno test -A --location=http://localhost
+deno test -A --unstable --location=http://localhost
 ```
 
 ## Project Structure

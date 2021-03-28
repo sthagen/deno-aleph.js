@@ -1,25 +1,26 @@
-import type { BufReader, BufWriter, MultipartFormData } from '../deps.ts'
-import { brotli, gzipEncode, MultipartReader } from '../deps.ts'
+import type { BufReader, BufWriter } from 'https://deno.land/std@0.90.0/io/bufio.ts'
+import type { MultipartFormData } from 'https://deno.land/std@0.90.0/mime/multipart.ts'
+import { MultipartReader } from 'https://deno.land/std@0.90.0/mime/multipart.ts'
+import { compress as brotli } from 'https://deno.land/x/brotli@v0.1.4/mod.ts'
+import { gzipEncode as gzip } from 'https://deno.land/x/wasm_gzip@v1.0.0/mod.ts'
 import log from '../shared/log.ts'
 import type { APIRequest, ServerRequest, ServerResponse } from '../types.ts'
 
 export class Request implements APIRequest {
   #req: ServerRequest
-  #params: Record<string, string>
-  #query: URLSearchParams
+  #params: URLSearchParams
   #cookies: ReadonlyMap<string, string>
   #resp = {
     status: 200,
     headers: new Headers({
-      'Server': 'Aleph.js',
+      Server: 'Aleph.js',
     }),
     done: false
   }
 
-  constructor(req: ServerRequest, params: Record<string, string>, query: URLSearchParams) {
+  constructor(req: ServerRequest, params: URLSearchParams) {
     this.#req = req
     this.#params = params
-    this.#query = query
     const cookies = new Map()
     this.headers.get('cookie')?.split(';').forEach(cookie => {
       const p = cookie.trim().split('=')
@@ -62,12 +63,8 @@ export class Request implements APIRequest {
     return this.#req.respond(r)
   }
 
-  get params(): Record<string, string> {
+  get params(): URLSearchParams {
     return this.#params
-  }
-
-  get query(): URLSearchParams {
-    return this.#query
   }
 
   get cookies(): ReadonlyMap<string, string> {
@@ -157,23 +154,23 @@ export class Request implements APIRequest {
       if (this.headers.get('accept-encoding')?.includes('br')) {
         this.#resp.headers.set('Vary', 'Origin')
         this.#resp.headers.set('Content-Encoding', 'br')
-        body = brotli.compress(body)
+        body = brotli(body)
       } else if (this.headers.get('accept-encoding')?.includes('gzip')) {
         this.#resp.headers.set('Vary', 'Origin')
         this.#resp.headers.set('Content-Encoding', 'gzip')
-        body = gzipEncode(body)
+        body = gzip(body)
       }
     }
     this.#resp.headers.set('Date', (new Date).toUTCString())
     this.#resp.done = true
     try {
-      return this.respond({
+      await this.respond({
         status: this.#resp.status,
         headers: this.#resp.headers,
         body
       })
     } catch (err) {
-      return log.warn('ServerRequest.respond:', err.message)
+      log.warn('ServerRequest.respond:', err.message)
     }
   }
 

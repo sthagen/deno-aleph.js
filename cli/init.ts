@@ -1,6 +1,11 @@
-import { colors, ensureDir, gzipDecode, path, Untar } from '../deps.ts'
+import { Untar } from 'https://deno.land/std@0.90.0/archive/tar.ts'
+import { green, dim } from 'https://deno.land/std@0.90.0/fmt/colors.ts'
+import { ensureDir } from 'https://deno.land/std@0.90.0/fs/ensure_dir.ts'
+import { join } from 'https://deno.land/std@0.90.0/path/mod.ts'
+import { gzipDecode } from 'https://deno.land/x/wasm_gzip@v1.0.0/mod.ts'
 import { ensureTextFile } from '../shared/fs.ts'
 import util from '../shared/util.ts'
+import { defaultReactVersion } from '../shared/constants.ts'
 import { VERSION } from '../version.ts'
 
 export const helpMessage = `
@@ -35,7 +40,7 @@ export default async function (nameArg?: string) {
 
   for await (const entry of entryList) {
     if (entry.fileName.startsWith(`alephjs-templates-${rev}/${template}/`)) {
-      const fp = path.join(cwd, name, util.trimPrefix(entry.fileName, `alephjs-templates-${rev}/${template}/`))
+      const fp = join(cwd, name, util.trimPrefix(entry.fileName, `alephjs-templates-${rev}/${template}/`))
       if (entry.type === 'directory') {
         await ensureDir(fp)
         continue
@@ -54,17 +59,18 @@ export default async function (nameArg?: string) {
   ]
   const importMap = {
     imports: {
-      '~/': './', '@/': './',
-      'aleph': `https://deno.land/x/aleph@v${VERSION}/mod.ts`,
+      '~/': './',
       'aleph/': `https://deno.land/x/aleph@v${VERSION}/`,
-      'react': 'https://esm.sh/react@17.0.1',
-      'react-dom': 'https://esm.sh/react-dom@17.0.1',
+      'framework': `https://deno.land/x/aleph@v${VERSION}/framework/core/mod.ts`,
+      'framework/react': `https://deno.land/x/aleph@v${VERSION}/framework/react/mod.ts`,
+      'react': `https://esm.sh/react@${defaultReactVersion}`,
+      'react-dom': `https://esm.sh/react-dom@${defaultReactVersion}`,
     },
     scopes: {}
   }
   await Promise.all([
-    Deno.writeTextFile(path.join(cwd, name, '.gitignore'), gitignore.join('\n')),
-    Deno.writeTextFile(path.join(cwd, name, 'import_map.json'), JSON.stringify(importMap, undefined, 4))
+    Deno.writeTextFile(join(cwd, name, '.gitignore'), gitignore.join('\n')),
+    Deno.writeTextFile(join(cwd, name, 'import_map.json'), JSON.stringify(importMap, undefined, 2))
   ])
 
   if (vscode) {
@@ -78,21 +84,21 @@ export default async function (nameArg?: string) {
       'deno.unstable': true,
       'deno.importMap': './import_map.json'
     }
-    await ensureDir(path.join(name, '.vscode'))
+    await ensureDir(join(name, '.vscode'))
     await Promise.all([
-      Deno.writeTextFile(path.join(name, '.vscode', 'extensions.json'), JSON.stringify(extensions, undefined, 4)),
-      Deno.writeTextFile(path.join(name, '.vscode', 'settings.json'), JSON.stringify(settigns, undefined, 4))
+      Deno.writeTextFile(join(name, '.vscode', 'extensions.json'), JSON.stringify(extensions, undefined, 2)),
+      Deno.writeTextFile(join(name, '.vscode', 'settings.json'), JSON.stringify(settigns, undefined, 2))
     ])
   }
 
   console.log('Done')
-  console.log(colors.dim('---'))
-  console.log(colors.green('Aleph.js is ready to go!'))
-  console.log(`${colors.dim('$')} cd ${name}`)
-  console.log(`${colors.dim('$')} aleph dev     ${colors.dim('# start the app in `development` mode')}`)
-  console.log(`${colors.dim('$')} aleph start   ${colors.dim('# start the app in `production` mode')}`)
-  console.log(`${colors.dim('$')} aleph build   ${colors.dim('# build the app to a static site (SSG)')}`)
-  console.log(colors.dim('---'))
+  console.log(dim('---'))
+  console.log(green('Aleph.js is ready to go!'))
+  console.log(`${dim('$')} cd ${name}`)
+  console.log(`${dim('$')} aleph dev     ${dim('# start the app in `development` mode')}`)
+  console.log(`${dim('$')} aleph start   ${dim('# start the app in `production` mode')}`)
+  console.log(`${dim('$')} aleph build   ${dim('# build the app to a static site (SSG)')}`)
+  console.log(dim('---'))
   Deno.exit(0)
 }
 
@@ -106,6 +112,6 @@ async function ask(question: string = ':', stdin = Deno.stdin, stdout = Deno.std
 
 async function confirm(question: string = 'are you sure?') {
   let a: string
-  while (!/^(y(es)?|no?)$/i.test(a = (await ask(question + ' [y/n]')).trim())) { }
+  while (!/^(y(es)?|no?)$/i.test(a = (await ask(question + ' ' + dim('[y/n]'))).trim())) { }
   return a.charAt(0).toLowerCase() === 'y'
 }

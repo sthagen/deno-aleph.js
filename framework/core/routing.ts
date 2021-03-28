@@ -1,9 +1,8 @@
-import { moduleExts } from '../../shared/constants.ts'
 import util from '../../shared/util.ts'
 import type { RouterURL } from '../../types.ts'
-import events from './events.ts'
+import { redirect } from './redirect.ts'
 
-const ghostRoute: Route = { path: '', module: { url: '', hash: '' } }
+const ghostRoute: Route = { path: '', module: { url: '' } }
 
 export type Route = {
   path: string
@@ -13,16 +12,15 @@ export type Route = {
 
 export type RouteModule = {
   readonly url: string
-  readonly hash: string
   readonly useDeno?: boolean
 }
 
 export type RoutingOptions = {
-  routes?: Route[]
-  rewrites?: Record<string, string>
   baseURL?: string
   defaultLocale?: string
   locales?: string[]
+  routes?: Route[]
+  rewrites?: Record<string, string>
 }
 
 export class Routing {
@@ -67,8 +65,12 @@ export class Routing {
     })
   }
 
-  update(module: RouteModule) {
-    const newRoute: Route = { path: toPagePath(module.url), module: module }
+  update(path: string, moduleUrl: string, options: { isIndex?: boolean, useDeno?: boolean } = {}) {
+    const { isIndex, ...rest } = options
+    const newRoute: Route = {
+      path: path === '/' ? path : util.trimSuffix(path, '/') + (options.isIndex ? '/' : ''),
+      module: { url: moduleUrl, ...rest }
+    }
     const dirtyRoutes: Set<Route[]> = new Set()
     let exists = false
     let targetRoutes = this._routes
@@ -76,8 +78,8 @@ export class Routing {
       const path = routePath.map(r => r.path).join('')
       const route = routePath[routePath.length - 1]
       const parentRoute = routePath[routePath.length - 2]
-      if (route.module.url === module.url) {
-        Object.assign(route.module, module)
+      if (route.module.url === newRoute.module.url) {
+        Object.assign(route.module, newRoute.module)
         exists = true
         return false
       }
@@ -129,7 +131,7 @@ export class Routing {
     let locale = this._defaultLocale
     let pathname = decodeURI(url.pathname)
     let pagePath = ''
-    let params: Record<string, string> = {}
+    let params = new URLSearchParams()
     let nestedModules: RouteModule[] = []
 
     if (pathname !== '/' && this._locales.length > 0) {
@@ -151,10 +153,17 @@ export class Routing {
           nestedModules.push(c.module)
         }
         pagePath = path
-        params = p
+        Object.entries(p).forEach(([key, value]) => {
+          params.append(key, value)
+        })
         return false
       }
     }, true)
+
+    for (const name of url.searchParams.keys()) {
+      const values = url.searchParams.getAll(name)
+      values.forEach(value => params.append(name, value))
+    }
 
     return [
       {
@@ -163,7 +172,6 @@ export class Routing {
         pathname,
         pagePath,
         params,
-        query: url.searchParams,
         push: (url: string) => redirect(url),
         replace: (url: string) => redirect(url, true),
       },
@@ -230,14 +238,13 @@ function matchPath(routePath: string, locPath: string): [Record<string, string>,
   return [params, true]
 }
 
-export function createBlankRouterURL(locale = 'en'): RouterURL {
+export function createBlankRouterURL(baseURL = '/', locale = 'en'): RouterURL {
   return {
-    baseURL: '/',
+    baseURL,
     locale,
     pagePath: '',
     pathname: '/',
-    params: {},
-    query: new URLSearchParams(),
+    params: new URLSearchParams(),
     push: () => void 0,
     replace: () => void 0,
   }
@@ -253,63 +260,14 @@ export function rewriteURL(reqUrl: string, baseURL: string, rewrites: Record<str
     const to = rewrites[path]
     const [params, ok] = matchPath(path, decodeURI(url.pathname))
     if (ok) {
-      const { searchParams } = url
-      url.href = 'http://localhost' + util.cleanPath(to.replace(/:(.+)(\/|&|$)/g, (s, k, e) => {
+      url.pathname = util.cleanPath(to.replace(/:(.+)(\/|&|$)/g, (s, k, e) => {
         if (k in params) {
           return params[k] + e
         }
         return s
       }))
-      for (const [key, value] of url.searchParams.entries()) {
-        searchParams.append(key, value)
-      }
-      url.search = searchParams.toString()
       break
     }
   }
   return url
-}
-
-export async function redirect(url: string, replace?: boolean) {
-  const { location, history } = window as any
-
-  if (!util.isNEString(url)) {
-    return
-  }
-
-  if (util.isLikelyHttpURL(url) || url.startsWith('file://') || url.startsWith('mailto:')) {
-    location.href = url
-    return
-  }
-
-  url = util.cleanPath(url)
-  if (replace) {
-    history.replaceState(null, '', url)
-  } else {
-    history.pushState(null, '', url)
-  }
-  events.emit('popstate', { type: 'popstate', resetScroll: true })
-}
-
-export function isModuleURL(url: string) {
-  for (const ext of moduleExts) {
-    if (url.endsWith('.' + ext)) {
-      return true
-    }
-  }
-  return false
-}
-
-export function toPagePath(url: string): string {
-  let pathname = util.trimModuleExt(url)
-  if (pathname.startsWith('/pages/')) {
-    pathname = util.trimPrefix(pathname, '/pages')
-  }
-  if (pathname.endsWith('/index')) {
-    pathname = util.trimSuffix(pathname, 'index')
-  }
-  if (pathname === '') {
-    pathname = '/'
-  }
-  return pathname
 }

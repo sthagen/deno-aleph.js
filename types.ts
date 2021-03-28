@@ -1,4 +1,5 @@
-import type { BufReader, BufWriter, MultipartFormData } from './deps.ts'
+import type { BufReader, BufWriter } from 'https://deno.land/std@0.90.0/io/bufio.ts'
+import type { MultipartFormData } from 'https://deno.land/std@0.90.0/mime/multipart.ts'
 
 /**
  * A loader plugin to load source media.
@@ -12,19 +13,26 @@ export type LoaderPlugin = {
   test: RegExp
   /** `acceptHMR` enables the HMR. */
   acceptHMR?: boolean
-  /** `allowPage` allows the loaded module as a page. */
-  allowPage?: boolean
+  /** `asPage` allows the loaded module as a page. */
+  asPage?: boolean
+  /** `pagePathReoslve` resolves the page path. */
+  pagePathResolve?(url: string): { path: string, isIndex?: boolean }
+  /** `resolve` resolves the module content. */
+  resolve?(url: string): Uint8Array | Promise<Uint8Array>
   /** `transform` transforms the source content. */
-  transform(source: { url: string, content: Uint8Array, map?: Uint8Array }): LoaderTransformResult | Promise<LoaderTransformResult>
+  transform?(input: { url: string, content: Uint8Array, map?: Uint8Array }): LoaderTransformOutput | Promise<LoaderTransformOutput>
 }
 
 /**
  * The result of loader transform.
  */
-export type LoaderTransformResult = {
-  code: string,
+export type LoaderTransformOutput = {
+  /** The transformed code type (default is 'js'). */
+  type?: 'css' | 'js' | 'jsx' | 'ts' | 'tsx'
+  /** The transformed code. */
+  code: string
+  /** The source map. */
   map?: string
-  loader?: string
 }
 
 /**
@@ -50,8 +58,8 @@ export type Plugin = LoaderPlugin | ServerPlugin
 export type Config = {
   /** `framework` specifies the framework (default is 'react'). */
   framework?: 'react'
-  /** `buildTarget` specifies the build target in production mode (default is **es5** to be compatible with IE11). */
-  buildTarget?: 'es5' | 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020'
+  /** `buildTarget` specifies the build target in production mode (default is **es2015**). */
+  buildTarget?: 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020'
   /** `baseUrl` specifies the path prefix for the application (default is '/'). */
   baseUrl?: string
   /** `srcDir` specifies the **src** dir (default is '/'). */
@@ -93,22 +101,11 @@ export interface ServerApplication {
   readonly workingDir: string
   readonly mode: 'development' | 'production'
   readonly config: Required<Config>
-  addModule(url: string, options?: ModuleOptions): Promise<void>
-  injectCode(stage: 'compilation' | 'hmr', transform: TransformFn): void
-}
-
-export type TransformFn = {
-  (url: string, code: string): string
-}
-
-/**
- * The module options.
- */
-export type ModuleOptions = {
-  code?: string
-  asAPI?: boolean
-  asPage?: boolean
-  pathname?: string
+  addModule(url: string, options?: { code?: string }): Promise<void>
+  injectCode(
+    stage: 'compilation' | 'hmr' | 'ssr',
+    transform: (url: string, code: string) => string
+  ): void
 }
 
 /**
@@ -138,8 +135,7 @@ export interface ServerResponse {
  * An interface extends the `ServerRequest` for API requests.
  */
 export interface APIRequest extends ServerRequest {
-  readonly params: Record<string, string>
-  readonly query: URLSearchParams
+  readonly params: URLSearchParams
   readonly cookies: ReadonlyMap<string, string>
   /** `readBody` reads the body to an object in bytes, string, json, or multipart form data. */
   readBody(type?: 'raw'): Promise<Uint8Array>
@@ -183,8 +179,7 @@ export type RouterURL = {
   readonly locale: string
   readonly pathname: string
   readonly pagePath: string
-  readonly params: Record<string, string>
-  readonly query: URLSearchParams
-  push(url: string): void,
-  replace(url: string): void,
+  readonly params: URLSearchParams
+  push(url: string): void
+  replace(url: string): void
 }

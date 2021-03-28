@@ -4,7 +4,8 @@
   "typescript.format.semicolons": "remove",
   "typescript.preferences.quoteStyle": "single",
   "[javascript]": {
-    "editor.defaultFormatter": "vscode.typescript-language-features"
+    "editor.defaultFormatter": "vscode.typescript-language-features",
+    "editor.formatOnSave": false,
   },
   "[typescript]": {
     "editor.defaultFormatter": "vscode.typescript-language-features",
@@ -26,6 +27,5 @@
   },
   "deno.enable": true,
   "deno.unstable": true,
-  "deno.import_map": "./import_map.json",
-  "deno.import_intellisense_autodiscovery": false
+  "deno.importMap": "./import_map.json"
 }

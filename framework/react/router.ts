@@ -1,9 +1,17 @@
-import { ComponentType, createElement, useCallback, useEffect, useState } from 'https://esm.sh/react'
+import {
+  ComponentType,
+  createElement,
+  useCallback,
+  useEffect,
+  useState,
+} from 'https://esm.sh/react'
 import events from '../core/events.ts'
+import { importModule } from '../core/module.ts'
 import { RouteModule, Routing } from '../core/routing.ts'
 import { RouterContext } from './context.ts'
 import { E400MissingComponent, E404Page, ErrorBoundary } from './error.ts'
-import { importModule, isLikelyReactComponent, loadPageData } from './helper.ts'
+import { isLikelyReactComponent } from './helper.ts'
+import { loadPageData } from './pagedata.ts'
 import type { PageRoute } from './pageprops.ts'
 import { createPageProps } from './pageprops.ts'
 
@@ -43,7 +51,7 @@ export default function Router({
     const [url, nestedModules] = routing.createRouter()
     if (url.pagePath !== '') {
       const imports = nestedModules.map(async mod => {
-        const { default: Component } = await importModule(baseURL, mod, e.forceRefetch)
+        const { default: Component } = await importModule(baseURL, mod.url, e.forceRefetch)
         return {
           url: mod.url,
           Component
@@ -74,10 +82,10 @@ export default function Router({
   useEffect(() => {
     const isDev = !('__ALEPH' in window)
     const { baseURL } = routing
-    const onAddModule = async (mod: RouteModule) => {
+    const onAddModule = async (mod: RouteModule & { pagePath?: string, isIndex?: boolean }) => {
       switch (mod.url) {
         case '/404.js': {
-          const { default: Component } = await importModule(baseURL, mod, true)
+          const { default: Component } = await importModule(baseURL, mod.url, true)
           if (isLikelyReactComponent(Component)) {
             setE404({ Component })
           } else {
@@ -86,7 +94,7 @@ export default function Router({
           break
         }
         case '/app.js': {
-          const { default: Component } = await importModule(baseURL, mod, true)
+          const { default: Component } = await importModule(baseURL, mod.url, true)
           if (isLikelyReactComponent(Component)) {
             setApp({ Component })
           } else {
@@ -95,8 +103,9 @@ export default function Router({
           break
         }
         default: {
-          if (mod.url.startsWith('/pages/')) {
-            routing.update(mod)
+          const { pagePath, url, ...rest } = mod
+          if (pagePath) {
+            routing.update(pagePath, url, rest)
             events.emit('popstate', { type: 'popstate', forceRefetch: true })
           }
           break
@@ -120,11 +129,11 @@ export default function Router({
       }
     }
     const onFetchPageModule = async ({ href }: { href: string }) => {
-      const [pathname, search] = href.split('?')
-      const [url, nestedModules] = routing.createRouter({ pathname, search })
+      const [pathname] = href.split('?')
+      const [url, nestedModules] = routing.createRouter({ pathname })
       if (url.pagePath !== '') {
         nestedModules.map(mod => {
-          importModule(baseURL, mod)
+          importModule(baseURL, mod.url)
         })
         if (appUseDeno || nestedModules.findIndex(mod => !!mod.useDeno) > -1) {
           loadPageData(url)
