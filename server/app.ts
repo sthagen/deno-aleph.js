@@ -21,7 +21,11 @@ import {
 import { EventEmitter } from '../framework/core/events.ts'
 import { moduleExts, toPagePath, trimModuleExt } from '../framework/core/module.ts'
 import { RouteModule, Routing } from '../framework/core/routing.ts'
-import { defaultReactVersion, minDenoVersion } from '../shared/constants.ts'
+import {
+  defaultReactVersion,
+  defaultReactEsmShBuildVersion,
+  minDenoVersion
+} from '../shared/constants.ts'
 import {
   ensureTextFile,
   existsDirSync,
@@ -36,7 +40,7 @@ import type {
 } from '../types.ts'
 import { VERSION } from '../version.ts'
 import { Bundler, bundlerRuntimeCode } from './bundler.ts'
-import { defaultConfig, loadConfig, loadImportMap, loadPostCSSConfig } from './config.ts'
+import { defaultConfig, loadConfig, loadImportMap } from './config.ts'
 import {
   computeHash,
   formatBytesWithColor,
@@ -75,7 +79,6 @@ export class Application implements ServerApplication {
   readonly importMap: ImportMap
   readonly ready: Promise<void>
 
-  #dirs: Map<string, string> = new Map()
   #modules: Map<string, Module> = new Map()
   #pageRouting: Routing = new Routing({})
   #apiRouting: Routing = new Routing({})
@@ -105,20 +108,22 @@ export class Application implements ServerApplication {
   /** initiate application */
   private async init(reload: boolean) {
     let t = performance.now()
-    const [config, importMap, postcssConfig] = await Promise.all([
+    const [config, importMap,] = await Promise.all([
       loadConfig(this.workingDir),
       loadImportMap(this.workingDir),
-      loadPostCSSConfig(this.workingDir),
     ])
 
     Object.assign(this.config, config)
     Object.assign(this.importMap, importMap)
     this.#pageRouting.config(this.config)
-    this.#cssProcesser.config(!this.isDev, postcssConfig.plugins)
+    this.#cssProcesser.config(!this.isDev, this.config.postcss.plugins)
+
+    console.log(this.config.postcss.plugins)
 
     // inject env variables
     Deno.env.set('ALEPH_VERSION', VERSION)
-    Deno.env.set('BUILD_MODE', this.mode)
+    Deno.env.set('ALEPH_BUILD_MODE', this.mode)
+    Deno.env.set('ALEPH_FRAMEWORK', this.framework)
 
     // inject browser navigator polyfill
     Object.assign((globalThis as any).navigator, {
@@ -144,8 +149,14 @@ export class Application implements ServerApplication {
     const alephPkgUri = getAlephPkgUri()
     const buildManifestFile = join(this.buildDir, 'build.manifest.json')
     const configChecksum = computeHash(JSON.stringify({
-      ...this.defaultCompileOptions,
-      plugins: this.config.plugins.filter(isLoaderPlugin).map(({ name }) => name)
+      ...this.sharedCompileOptions,
+      plugins: this.config.plugins.filter(isLoaderPlugin).map(({ name }) => name),
+      postcssPlugins: this.config.postcss.plugins.map(p => p.toString())
+    }, (key: string, value: any) => {
+      if (key === 'inlineStylePreprocess') {
+        return void 0
+      }
+      return value
     }))
     let shouldRebuild = !existsFileSync(buildManifestFile)
     if (!shouldRebuild) {
@@ -186,12 +197,12 @@ export class Application implements ServerApplication {
     }
 
     // init framework
-    const { init } = await import(`../framework/${this.config.framework}/init.ts`)
+    const { init } = await import(`../framework/${this.framework}/init.ts`)
     await init(this)
 
     // import framework renderer
     if (this.config.ssr) {
-      const { jsFile } = await this.compile(`${alephPkgUri}/framework/${this.config.framework}/renderer.ts`)
+      const { jsFile } = await this.compile(`${alephPkgUri}/framework/${this.framework}/renderer.ts`)
       const { render } = await import(`file://${jsFile}`)
       if (util.isFunction(render)) {
         this.#renderer.setFrameworkRenderer({ render })
@@ -201,7 +212,7 @@ export class Application implements ServerApplication {
     log.info('Compiling...')
 
     // pre-compile framework modules
-    await this.compile(`${alephPkgUri}/framework/${this.config.framework}/bootstrap.ts`)
+    await this.compile(`${alephPkgUri}/framework/${this.framework}/bootstrap.ts`)
     if (this.isDev) {
       await this.compile(`${alephPkgUri}/framework/core/hmr.ts`)
       await this.compile(`${alephPkgUri}/framework/core/nomodule.ts`)
@@ -233,7 +244,7 @@ export class Application implements ServerApplication {
         const url = util.cleanPath('/pages/' + util.trimPrefix(p, pagesDir))
         let validated = moduleExts.some(ext => p.endsWith('.' + ext))
         if (!validated) {
-          validated = this.config.plugins.some(p => p.type === 'loader' && p.test.test(url) && p.asPage)
+          validated = this.loaders.some(p => p.type === 'loader' && p.test.test(url) && p.allowPage)
         }
         if (validated) {
           await this.compile(url)
@@ -378,7 +389,7 @@ export class Application implements ServerApplication {
     }
 
     // is page module by plugin
-    if (this.config.plugins.some(p => p.type === 'loader' && p.test.test(url) && p.asPage)) {
+    if (this.loaders.some(p => p.test.test(url) && p.allowPage)) {
       return true
     }
 
@@ -396,16 +407,24 @@ export class Application implements ServerApplication {
     return this.mode === 'development'
   }
 
+  get framework() {
+    return this.config.framework
+  }
+
   get srcDir() {
-    return this.getDir('src', () => join(this.workingDir, this.config.srcDir))
+    return join(this.workingDir, this.config.srcDir)
   }
 
   get outputDir() {
-    return this.getDir('output', () => join(this.workingDir, this.config.outputDir))
+    return join(this.workingDir, this.config.outputDir)
   }
 
   get buildDir() {
-    return this.getDir('build', () => join(this.workingDir, '.aleph', this.mode))
+    return join(this.workingDir, '.aleph', this.mode)
+  }
+
+  get loaders() {
+    return this.config.plugins.filter(isLoaderPlugin)
   }
 
   /** returns the module by given url. */
@@ -544,10 +563,9 @@ export class Application implements ServerApplication {
       }
     }
 
-    return this.config.plugins.some(p => (
-      p.type === 'loader' &&
+    return this.loaders.some(p => (
       p.test.test(url) &&
-      (p.asPage || p.acceptHMR)
+      (p.acceptHMR || p.allowPage)
     ))
   }
 
@@ -677,12 +695,27 @@ export class Application implements ServerApplication {
   }
 
   /** default compiler options */
-  private get defaultCompileOptions(): TransformOptions {
+  get sharedCompileOptions(): TransformOptions {
     return {
       importMap: this.importMap,
       alephPkgUri: getAlephPkgUri(),
       reactVersion: defaultReactVersion,
+      fixedReactEsmShBuildVersion: defaultReactEsmShBuildVersion,
       isDev: this.isDev,
+      inlineStylePreprocess: async (key: string, type: string, tpl: string) => {
+        if (type !== 'css') {
+          for (const loader of this.loaders) {
+            if (loader.test.test(`.${type}`) && loader.transform) {
+              const { code, type } = await loader.transform({ url: key, content: (new TextEncoder).encode(tpl) })
+              if (type === 'css') {
+                tpl = code
+                break
+              }
+            }
+          }
+        }
+        return (await this.#cssProcesser.transform(key, tpl)).code
+      }
     }
   }
 
@@ -730,16 +763,6 @@ export class Application implements ServerApplication {
     log.info(`Done in ${Math.round(performance.now() - start)}ms`)
   }
 
-  private getDir(name: string, init: () => string) {
-    if (this.#dirs.has(name)) {
-      return this.#dirs.get(name)!
-    }
-
-    const dir = init()
-    this.#dirs.set(name, dir)
-    return dir
-  }
-
   private createRouteUpdate(url: string): [string, string, { isIndex?: boolean, useDeno?: boolean }] {
     const isBuiltinModule = moduleExts.some(ext => url.endsWith('.' + ext))
     let pagePath = isBuiltinModule ? toPagePath(url) : util.trimSuffix(url, '/pages')
@@ -756,11 +779,11 @@ export class Application implements ServerApplication {
     }
 
     if (!isBuiltinModule) {
-      for (const plugin of this.config.plugins) {
-        if (plugin.type === 'loader' && plugin.test.test(url) && plugin.pagePathResolve) {
-          const { path, isIndex: _isIndex } = plugin.pagePathResolve(url)
+      for (const loader of this.loaders) {
+        if (loader.test.test(url) && loader.pagePathResolve) {
+          const { path, isIndex: _isIndex } = loader.pagePathResolve(url)
           if (!util.isNEString(path)) {
-            throw new Error(`bad pagePathResolve result of '${plugin.name}' plugin`)
+            throw new Error(`bad pagePathResolve result of '${loader.name}' plugin`)
           }
           pagePath = path
           if (!!_isIndex) {
@@ -783,9 +806,9 @@ export class Application implements ServerApplication {
 
   /** fetch module content */
   private async fetchModule(url: string): Promise<{ content: Uint8Array, contentType: string | null }> {
-    for (const plugin of this.config.plugins) {
-      if (plugin.type === 'loader' && plugin.test.test(url) && plugin.resolve !== undefined) {
-        const v = plugin.resolve(url)
+    for (const loader of this.loaders) {
+      if (loader.test.test(url) && loader.resolve !== undefined) {
+        const v = loader.resolve(url)
         let content: Uint8Array
         if (v instanceof Promise) {
           content = await v
@@ -919,9 +942,9 @@ export class Application implements ServerApplication {
       }
     }
 
-    for (const plugin of this.config.plugins) {
-      if (plugin.type === 'loader' && plugin.test.test(url) && plugin.transform) {
-        const { code, type = 'js', map } = await plugin.transform({ url, content: sourceContent })
+    for (const loader of this.loaders) {
+      if (loader.test.test(url) && loader.transform) {
+        const { code, type = 'js', map } = await loader.transform({ url, content: sourceContent })
         sourceCode = code
         if (map) {
           sourceMap = map
@@ -1091,15 +1114,14 @@ export class Application implements ServerApplication {
       }
 
       const { code, deps, starExports, map } = await transform(url, source.code, {
-        ...this.defaultCompileOptions,
+        ...this.sharedCompileOptions,
+        sourceMap: this.isDev,
         swcOptions: {
           target: 'es2020',
           sourceType: source.type
         },
         // workaround for https://github.com/denoland/deno/issues/9849
         resolveStarExports: !this.isDev && Deno.version.deno.replace(/\.\d+$/, '') === '1.8',
-        sourceMap: this.isDev,
-        loaders: this.config.plugins.filter(isLoaderPlugin)
       })
 
       jsContent = code
@@ -1205,7 +1227,7 @@ export class Application implements ServerApplication {
 
     // add framwork bootstrap module as shared entry
     entryMods.set(
-      [`${getAlephPkgUri()}/framework/${this.config.framework}/bootstrap.ts`],
+      [`${getAlephPkgUri()}/framework/${this.framework}/bootstrap.ts`],
       true
     )
 
@@ -1265,9 +1287,7 @@ export class Application implements ServerApplication {
 
     // render pages
     const paths = new Set(this.#pageRouting.paths)
-    if (typeof ssr === 'object' && ssr.staticPaths) {
-      ssr.staticPaths.forEach(path => paths.add(path))
-    }
+    // todo: check getStaticPaths
     await Promise.all(Array.from(paths).map(async pathname => {
       if (this.isSSRable(pathname)) {
         const [router, nestedModules] = this.#pageRouting.createRouter({ pathname })

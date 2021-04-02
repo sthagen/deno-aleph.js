@@ -1,5 +1,6 @@
 import type { BufReader, BufWriter } from 'https://deno.land/std@0.90.0/io/bufio.ts'
 import type { MultipartFormData } from 'https://deno.land/std@0.90.0/mime/multipart.ts'
+import { Plugin, PluginCreator } from 'https://esm.sh/postcss@8.2.8'
 
 /**
  * A loader plugin to load source media.
@@ -13,8 +14,8 @@ export type LoaderPlugin = {
   test: RegExp
   /** `acceptHMR` enables the HMR. */
   acceptHMR?: boolean
-  /** `asPage` allows the loaded module as a page. */
-  asPage?: boolean
+  /** allowPage` allows the loaded module as a page. */
+  allowPage?: boolean
   /** `pagePathReoslve` resolves the page path. */
   pagePathResolve?(url: string): { path: string, isIndex?: boolean }
   /** `resolve` resolves the module content. */
@@ -47,10 +48,7 @@ export type ServerPlugin = {
   onInit(app: ServerApplication): Promise<void> | void
 }
 
-/**
- * A plugin for the aleph server application.
- */
-export type Plugin = LoaderPlugin | ServerPlugin
+export type PostCSSPlugin = string | [string, any] | Plugin | PluginCreator<any>
 
 /**
  * The config for the aleph server application.
@@ -73,7 +71,9 @@ export type Config = {
   /** `ssr` specifies the options for **SSR**. */
   ssr?: boolean | SSROptions
   /** `plugins` specifies some plugins for the appliaction. */
-  plugins?: Plugin[]
+  plugins?: (LoaderPlugin | ServerPlugin)[]
+  /** `postcss` specifies the postcss plugins. */
+  postcss?: { plugins: PostCSSPlugin[] }
   /** `headers` appends custom headers for server requests. */
   headers?: Record<string, string>
   /** `rewrites` specifies the server rewrite map. */
@@ -90,8 +90,6 @@ export type SSROptions = {
   include?: RegExp[]
   /** A list of RegExp for paths to skip **SSR**. */
   exclude?: RegExp[]
-  /** A list of paths for **dynamic routes** in **SSG**. */
-  staticPaths?: string[]
 }
 
 /**
