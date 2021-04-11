@@ -1,6 +1,6 @@
-import { join } from 'https://deno.land/std@0.90.0/path/mod.ts'
-import { serve as stdServe, serveTLS } from 'https://deno.land/std@0.90.0/http/server.ts'
-import { acceptWebSocket, isWebSocketCloseEvent } from 'https://deno.land/std@0.90.0/ws/mod.ts'
+import { join } from 'https://deno.land/std@0.92.0/path/mod.ts'
+import { serve as stdServe, serveTLS } from 'https://deno.land/std@0.92.0/http/server.ts'
+import { acceptWebSocket, isWebSocketCloseEvent } from 'https://deno.land/std@0.92.0/ws/mod.ts'
 import { trimModuleExt } from '../framework/core/module.ts'
 import { rewriteURL } from '../framework/core/routing.ts'
 import { existsFileSync } from '../shared/fs.ts'
@@ -31,7 +31,7 @@ export class Server {
     const { baseUrl, rewrites } = app.config
     const url = rewriteURL(r.url, baseUrl, rewrites)
     const pathname = decodeURI(url.pathname)
-    const req = new Request(r, url.searchParams)
+    const req = new Request(r, {}, url.searchParams)
 
     // set custom headers
     for (const key in app.config.headers) {
@@ -155,10 +155,10 @@ export class Server {
         })
         if (route !== null) {
           try {
-            const [{ params }, { jsFile, hash }] = route
+            const [{ params, query }, { jsFile, hash }] = route
             const { default: handle } = await import(`file://${jsFile}#${hash.slice(0, 6)}`)
             if (util.isFunction(handle)) {
-              await handle(new Request(req, params))
+              await handle(new Request(req, params, query))
             } else {
               req.status(500).json({ status: 500, message: 'bad api handler' })
             }
@@ -220,7 +220,10 @@ export async function serve({ app, port, hostname, certFile, keyFile }: ServeOpt
         server.handle(r)
       }
     } catch (err) {
-      if (err instanceof Deno.errors.AddrInUse && app.isDev) {
+      if (err instanceof Deno.errors.AddrInUse) {
+        if (!app.isDev) {
+          log.fatal(`port ${port} already in use!`)
+        }
         log.warn(`port ${port} already in use, try ${port + 1}...`)
         port++
       } else {

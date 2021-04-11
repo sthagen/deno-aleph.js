@@ -1,4 +1,4 @@
-import { Component, createElement, CSSProperties } from 'https://esm.sh/react'
+import { Component, createElement, CSSProperties } from 'react'
 
 export class ErrorBoundary extends Component {
   state: { error: Error | null }
@@ -117,5 +117,3 @@ export function StatusError({ status, message }: { status: number, message: stri
     )
   )
 }
-
-export class AsyncUseDenoError extends Error { }

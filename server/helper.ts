@@ -1,13 +1,26 @@
-import { dim, red, yellow } from 'https://deno.land/std@0.90.0/fmt/colors.ts'
-import { createHash } from 'https://deno.land/std@0.90.0/hash/mod.ts'
-import { relative } from 'https://deno.land/std@0.90.0/path/mod.ts'
+import { dim, red, yellow } from 'https://deno.land/std@0.92.0/fmt/colors.ts'
+import { createHash } from 'https://deno.land/std@0.92.0/hash/mod.ts'
+import { relative } from 'https://deno.land/std@0.92.0/path/mod.ts'
 import { existsDirSync } from '../shared/fs.ts'
 import util from '../shared/util.ts'
 import type { ServerPlugin, LoaderPlugin } from '../types.ts'
 import { VERSION } from '../version.ts'
+import { localProxy } from './localproxy.ts'
 
 export const reLocaleID = /^[a-z]{2}(-[a-zA-Z0-9]+)?$/
 export const reFullVersion = /@v?\d+\.\d+\.\d+/i
+
+let __denoDir: string | null = null
+let __localProxy = false
+
+/** check whether should proxy https://deno.land/x/aleph on local. */
+export function checkAlephDev() {
+  const v = Deno.env.get('ALEPH_DEV')
+  if (v !== undefined && !__localProxy) {
+    localProxy(Deno.cwd(), 2020)
+    __localProxy = true
+  }
+}
 
 /** check the plugin whether is a loader plugin. */
 export function isLoaderPlugin(plugin: LoaderPlugin | ServerPlugin): plugin is LoaderPlugin {
@@ -15,7 +28,6 @@ export function isLoaderPlugin(plugin: LoaderPlugin | ServerPlugin): plugin is L
 }
 
 /** get deno dir. */
-let __denoDir: string | null = null
 export async function getDenoDir() {
   if (__denoDir !== null) {
     return __denoDir

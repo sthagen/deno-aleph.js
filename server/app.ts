@@ -1,20 +1,19 @@
-import { bold, dim } from 'https://deno.land/std@0.90.0/fmt/colors.ts'
-import { ensureDir } from 'https://deno.land/std@0.90.0/fs/ensure_dir.ts'
-import { walk } from 'https://deno.land/std@0.90.0/fs/walk.ts'
-import { createHash } from 'https://deno.land/std@0.90.0/hash/mod.ts'
+import { bold, dim } from 'https://deno.land/std@0.92.0/fmt/colors.ts'
+import { ensureDir } from 'https://deno.land/std@0.92.0/fs/ensure_dir.ts'
+import { walk } from 'https://deno.land/std@0.92.0/fs/walk.ts'
+import { createHash } from 'https://deno.land/std@0.92.0/hash/mod.ts'
 import {
   basename,
   dirname,
   extname,
   join,
   resolve
-} from 'https://deno.land/std@0.90.0/path/mod.ts'
+} from 'https://deno.land/std@0.92.0/path/mod.ts'
 import { Bundler, bundlerRuntimeCode } from '../bundler/mod.ts'
 import {
   buildChecksum,
   ImportMap,
   parseExportNames,
-  ReactResolve,
   SourceType,
   transform,
   TransformOptions
@@ -31,14 +30,19 @@ import {
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
 import type {
-  Config,
   RouterURL,
   ServerApplication
 } from '../types.ts'
 import { VERSION } from '../version.ts'
-import { defaultConfig, loadConfig, loadImportMap } from './config.ts'
+import {
+  defaultConfig,
+  loadConfig,
+  loadAndUpgradeImportMap,
+  RequiredConfig
+} from './config.ts'
 import { CSSProcessor } from './css.ts'
 import {
+  checkAlephDev,
   computeHash,
   formatBytesWithColor,
   getAlephPkgUri,
@@ -53,10 +57,11 @@ import { Renderer } from './ssr.ts'
 /** A module includes the compilation details. */
 export type Module = {
   url: string
-  jsFile: string
+  deps: DependencyDescriptor[]
+  isStyle: boolean
   sourceHash: string
   hash: string
-  deps: DependencyDescriptor[]
+  jsFile: string
 }
 
 /** The dependency descriptor. */
@@ -72,7 +77,7 @@ type TransformFn = (url: string, code: string) => string
 export class Application implements ServerApplication {
   readonly workingDir: string
   readonly mode: 'development' | 'production'
-  readonly config: Required<Config & { react: ReactResolve }>
+  readonly config: RequiredConfig
   readonly importMap: ImportMap
   readonly ready: Promise<void>
 
@@ -95,6 +100,7 @@ export class Application implements ServerApplication {
       log.error(`Aleph.js needs Deno ${minDenoVersion}+, please upgrade Deno.`)
       Deno.exit(1)
     }
+    checkAlephDev()
     this.workingDir = resolve(workingDir)
     this.mode = mode
     this.config = { ...defaultConfig }
@@ -107,15 +113,28 @@ export class Application implements ServerApplication {
     let t = performance.now()
     const [config, importMap,] = await Promise.all([
       loadConfig(this.workingDir),
-      loadImportMap(this.workingDir),
+      loadAndUpgradeImportMap(this.workingDir),
     ])
 
     Object.assign(this.config, config)
     Object.assign(this.importMap, importMap)
     this.#pageRouting.config(this.config)
-    this.#cssProcesser.config(!this.isDev, this.config.postcss.plugins)
+    this.#cssProcesser.config(!this.isDev, this.config.css)
 
     // inject env variables
+    // load .env
+    for await (const { path: p, } of walk(this.workingDir, { match: [/(^|\/|\\)\.env(\.|$)/i], maxDepth: 1 })) {
+      const text = await Deno.readTextFile(p)
+      text.split('\n').forEach(line => {
+        let [key, value] = util.splitBy(line, '=')
+        key = key.trim()
+        if (key) {
+          Deno.env.set(key, value.trim())
+        }
+      })
+      log.info('load env from', basename(p))
+    }
+
     Deno.env.set('ALEPH_VERSION', VERSION)
     Deno.env.set('ALEPH_BUILD_MODE', this.mode)
     Deno.env.set('ALEPH_FRAMEWORK', this.framework)
@@ -145,15 +164,18 @@ export class Application implements ServerApplication {
     const buildManifestFile = join(this.buildDir, 'build.manifest.json')
     const plugins = computeHash(JSON.stringify({
       plugins: this.config.plugins.filter(isLoaderPlugin).map(({ name }) => name),
-      postcssPlugins: this.config.postcss.plugins.map(p => {
-        if (util.isString(p)) {
-          return p
-        } else if (util.isArray(p)) {
-          return p[0] + JSON.stringify(p[1])
-        } else {
-          p.toString()
-        }
-      }),
+      css: {
+        modules: this.config.css.modules,
+        postcss: this.config.css.postcss.plugins.map(p => {
+          if (util.isString(p)) {
+            return p
+          } else if (util.isArray(p)) {
+            return p[0] + JSON.stringify(p[1])
+          } else {
+            p.toString()
+          }
+        })
+      },
       react: this.config.react,
     }, (key: string, value: any) => {
       if (key === 'inlineStylePreprocess') {
@@ -308,20 +330,20 @@ export class Application implements ServerApplication {
                   if (trimModuleExt(url) === '/app') {
                     this.#renderer.clearCache()
                   } else if (url.startsWith('/pages/')) {
-                    const [pagePath] = this.createRouteUpdate(url)
-                    this.#renderer.clearCache(pagePath)
+                    const [routePath] = this.createRouteUpdate(url)
+                    this.#renderer.clearCache(routePath)
                     this.#pageRouting.update(...this.createRouteUpdate(url))
                   } else if (url.startsWith('/api/')) {
                     this.#apiRouting.update(...this.createRouteUpdate(url))
                   }
                 }
                 if (hmrable) {
-                  let pagePath: string | undefined = undefined
+                  let routePath: string | undefined = undefined
                   let useDeno: boolean | undefined = undefined
                   let isIndex: boolean | undefined = undefined
                   if (mod.url.startsWith('/pages/')) {
                     const [path, _, options] = this.createRouteUpdate(mod.url)
-                    pagePath = path
+                    routePath = path
                     useDeno = options.useDeno
                     isIndex = options.isIndex
                   } else {
@@ -336,7 +358,7 @@ export class Application implements ServerApplication {
                   }
                   if (type === 'add') {
                     this.#fsWatchListeners.forEach(e => {
-                      e.emit('add', { url: mod.url, pagePath, isIndex, useDeno })
+                      e.emit('add', { url: mod.url, routePath, isIndex, useDeno })
                     })
                   } else {
                     this.#fsWatchListeners.forEach(e => {
@@ -358,12 +380,12 @@ export class Application implements ServerApplication {
               if (trimModuleExt(url) === '/app') {
                 this.#renderer.clearCache()
               } else if (url.startsWith('/pages/')) {
-                const [pagePath] = this.createRouteUpdate(url)
-                this.#renderer.clearCache(pagePath)
-                this.#pageRouting.removeRoute(pagePath)
+                const [routePath] = this.createRouteUpdate(url)
+                this.#renderer.clearCache(routePath)
+                this.#pageRouting.removeRoute(routePath)
               } else if (url.startsWith('/api/')) {
-                const [pagePath] = this.createRouteUpdate(url)
-                this.#apiRouting.removeRoute(pagePath)
+                const [routePath] = this.createRouteUpdate(url)
+                this.#apiRouting.removeRoute(routePath)
               }
               this.#modules.delete(url)
               if (this.isHMRable(url)) {
@@ -448,6 +470,19 @@ export class Application implements ServerApplication {
     return null
   }
 
+  lookupStyleModules(...urls: string[]): Module[] {
+    const mods: Module[] = []
+    urls.forEach(url => {
+      this.lookupDeps(url, ({ url }) => {
+        const mod = this.#modules.get(url)
+        if (mod && mod.isStyle) {
+          mods.push({ ...mod, deps: [...mod.deps] })
+        }
+      })
+    })
+    return mods
+  }
+
   getPageRoute(location: { pathname: string, search?: string }): [RouterURL, RouteModule[]] {
     return this.#pageRouting.createRouter(location)
   }
@@ -456,7 +491,7 @@ export class Application implements ServerApplication {
     const router = this.#apiRouting.createRouter(location)
     if (router !== null) {
       const [url, nestedModules] = router
-      if (url.pagePath !== '') {
+      if (url.routePath !== '') {
         const { url: moduleUrl } = nestedModules.pop()!
         if (this.#modules.has(moduleUrl)) {
           return [url, this.#modules.get(moduleUrl)!]
@@ -493,13 +528,13 @@ export class Application implements ServerApplication {
     }
 
     const [router, nestedModules] = this.#pageRouting.createRouter(loc)
-    const { pagePath } = router
-    if (pagePath === '') {
+    const { routePath } = router
+    if (routePath === '') {
       return null
     }
 
     const path = loc.pathname + (loc.search || '')
-    const [_, data] = await this.#renderer.useCache(pagePath, path, async () => {
+    const [_, data] = await this.#renderer.useCache(routePath, path, async () => {
       return await this.#renderer.renderPage(router, nestedModules)
     })
     return data
@@ -508,8 +543,8 @@ export class Application implements ServerApplication {
   /** get ssr page */
   async getPageHTML(loc: { pathname: string, search?: string }): Promise<[number, string]> {
     const [router, nestedModules] = this.#pageRouting.createRouter(loc)
-    const { pagePath } = router
-    const status = pagePath !== '' ? 200 : 404
+    const { routePath } = router
+    const status = routePath !== '' ? 200 : 404
     const path = loc.pathname + (loc.search || '')
 
     if (!this.isSSRable(loc.pathname)) {
@@ -519,14 +554,14 @@ export class Application implements ServerApplication {
       return [status, html]
     }
 
-    if (pagePath === '') {
+    if (routePath === '') {
       const [html] = await this.#renderer.useCache('404', path, async () => {
         return [await this.#renderer.render404Page(router), null]
       })
       return [status, html]
     }
 
-    const [html] = await this.#renderer.useCache(pagePath, path, async () => {
+    const [html] = await this.#renderer.useCache(routePath, path, async () => {
       let [html, data] = await this.#renderer.renderPage(router, nestedModules)
       return [html, data]
     })
@@ -564,6 +599,11 @@ export class Application implements ServerApplication {
           ['/app', '/404'].includes(util.trimSuffix(url, '.' + ext))
         )
       }
+    }
+
+    const mod = this.#modules.get(url)
+    if (mod && mod.isStyle) {
+      return true
     }
 
     return this.loaders.some(p => (
@@ -711,7 +751,6 @@ export class Application implements ServerApplication {
               const { code, type } = await loader.transform({ url: key, content: (new TextEncoder).encode(tpl) })
               if (type === 'css') {
                 tpl = code
-                break
               }
             }
           }
@@ -767,7 +806,7 @@ export class Application implements ServerApplication {
 
   private createRouteUpdate(url: string): [string, string, { isIndex?: boolean, useDeno?: boolean }] {
     const isBuiltinModule = moduleExts.some(ext => url.endsWith('.' + ext))
-    let pagePath = isBuiltinModule ? toPagePath(url) : util.trimSuffix(url, '/pages')
+    let routePath = isBuiltinModule ? toPagePath(url) : util.trimSuffix(url, '/pages')
     let useDeno: boolean | undefined = undefined
     let isIndex: boolean | undefined = undefined
 
@@ -787,14 +826,14 @@ export class Application implements ServerApplication {
           if (!util.isNEString(path)) {
             throw new Error(`bad pagePathResolve result of '${loader.name}' plugin`)
           }
-          pagePath = path
+          routePath = path
           if (!!_isIndex) {
             isIndex = true
           }
           break
         }
       }
-    } else if (pagePath !== '/') {
+    } else if (routePath !== '/') {
       for (const ext of moduleExts) {
         if (url.endsWith('/index.' + ext)) {
           isIndex = true
@@ -803,7 +842,7 @@ export class Application implements ServerApplication {
       }
     }
 
-    return [pagePath, url, { isIndex, useDeno }]
+    return [routePath, url, { isIndex, useDeno }]
   }
 
   /** fetch module content */
@@ -895,13 +934,11 @@ export class Application implements ServerApplication {
         if (!isLocalhost) {
           await ensureDir(cacheDir)
           Deno.writeFile(contentFile, content)
-          Deno.writeTextFile(metaFile, JSON.stringify({
-            headers: Array.from(resp.headers.entries()).reduce((m, [k, v]) => {
-              m[k] = v
-              return m
-            }, {} as Record<string, string>),
-            url
-          }, undefined, 2))
+          const headers: Record<string, string> = {}
+          resp.headers.forEach((val, key) => {
+            headers[key] = val
+          })
+          Deno.writeTextFile(metaFile, JSON.stringify({ headers, url }, undefined, 2))
         }
         return {
           content,
@@ -919,10 +956,18 @@ export class Application implements ServerApplication {
     url: string,
     sourceContent: Uint8Array,
     contentType: string | null
-  ): Promise<{ code: string, type: SourceType, map: string | null } | null> {
-    let sourceCode = (new TextDecoder).decode(sourceContent)
+  ): Promise<{
+    code: string
+    type: SourceType
+    isStyle: boolean
+    map?: string
+  } | null> {
+    const encoder = new TextEncoder()
+    const decoder = new TextDecoder()
+
     let sourceType: SourceType | null = null
-    let sourceMap: string | null = null
+    let sourceMap: Uint8Array | null = null
+    let isStyle = false
 
     if (contentType !== null) {
       switch (contentType.split(';')[0].trim()) {
@@ -946,10 +991,10 @@ export class Application implements ServerApplication {
 
     for (const loader of this.loaders) {
       if (loader.test.test(url) && loader.transform) {
-        const { code, type = 'js', map } = await loader.transform({ url, content: sourceContent })
-        sourceCode = code
+        const { code, type = 'js', map } = await loader.transform({ url, content: sourceContent, map: sourceMap ?? undefined })
+        sourceContent = encoder.encode(code)
         if (map) {
-          sourceMap = map
+          sourceMap = encoder.encode(map)
         }
         switch (type) {
           case 'js':
@@ -968,7 +1013,6 @@ export class Application implements ServerApplication {
             sourceType = SourceType.CSS
             break
         }
-        break
       }
     }
 
@@ -987,6 +1031,7 @@ export class Application implements ServerApplication {
         case 'tsx':
           sourceType = SourceType.TSX
           break
+        case 'postcss':
         case 'pcss':
         case 'css':
           sourceType = SourceType.CSS
@@ -997,15 +1042,21 @@ export class Application implements ServerApplication {
     }
 
     if (sourceType === SourceType.CSS) {
-      const { code, map } = await this.#cssProcesser.transform(url, sourceCode)
-      sourceCode = code
+      const { code, map } = await this.#cssProcesser.transform(url, (new TextDecoder).decode(sourceContent))
+      sourceContent = encoder.encode(code)
       sourceType = SourceType.JS
+      isStyle = true
       if (map) {
-        sourceMap = map
+        sourceMap = encoder.encode(map)
       }
     }
 
-    return { code: sourceCode, type: sourceType, map: sourceMap }
+    return {
+      code: decoder.decode(sourceContent),
+      type: sourceType,
+      isStyle,
+      map: sourceMap ? decoder.decode(sourceMap) : undefined
+    }
   }
 
   /** compile a moudle by given url, then cache on the disk. */
@@ -1020,12 +1071,12 @@ export class Application implements ServerApplication {
       once?: boolean,
     } = {}
   ): Promise<Module> {
+    const { sourceCode, forceCompile, once } = options
     const isRemote = util.isLikelyHttpURL(url)
     const localUrl = toLocalUrl(url)
     const saveDir = join(this.buildDir, dirname(localUrl))
     const name = trimModuleExt(basename(localUrl))
     const metaFile = join(saveDir, `${name}.meta.json`)
-    const { sourceCode, forceCompile, once } = options
 
     let mod: Module
     if (this.#modules.has(url)) {
@@ -1037,6 +1088,7 @@ export class Application implements ServerApplication {
       mod = {
         url,
         deps: [],
+        isStyle: false,
         sourceHash: '',
         hash: '',
         jsFile: join(saveDir, `${name}.js`),
@@ -1046,10 +1098,11 @@ export class Application implements ServerApplication {
       }
       if (existsFileSync(metaFile)) {
         try {
-          const { url: __url, sourceHash, deps } = JSON.parse(await Deno.readTextFile(metaFile))
-          if (__url === url && util.isNEString(sourceHash) && util.isArray(deps)) {
+          const { url: _url, deps, isStyle, sourceHash } = JSON.parse(await Deno.readTextFile(metaFile))
+          if (_url === url && util.isNEString(sourceHash) && util.isArray(deps)) {
             mod.sourceHash = sourceHash
             mod.deps = deps
+            mod.isStyle = !!isStyle
           } else {
             log.warn(`removing invalid metadata '${name}.meta.json'`)
             Deno.remove(metaFile)
@@ -1141,6 +1194,7 @@ export class Application implements ServerApplication {
         }
       }
 
+      mod.isStyle = source.isStyle
       mod.deps = deps.map(({ specifier, isDynamic }) => {
         const dep: DependencyDescriptor = { url: specifier, hash: '' }
         if (isDynamic) {
@@ -1184,8 +1238,9 @@ export class Application implements ServerApplication {
       await Promise.all([
         ensureTextFile(metaFile, JSON.stringify({
           url,
-          sourceHash: mod.sourceHash,
           deps: mod.deps,
+          sourceHash: mod.sourceHash,
+          isStyle: mod.isStyle ? true : undefined
         }, undefined, 2)),
         ensureTextFile(mod.jsFile, jsContent + (jsSourceMap ? `//# sourceMappingURL=${basename(mod.jsFile)}.map` : '')),
         jsSourceMap ? ensureTextFile(mod.jsFile + '.map', jsSourceMap) : Promise.resolve(),
@@ -1269,7 +1324,6 @@ export class Application implements ServerApplication {
       })
     }
 
-    log.info('- bundle')
     await this.#bundler.bundle(concatAllEntries())
   }
 
@@ -1293,7 +1347,7 @@ export class Application implements ServerApplication {
     await Promise.all(Array.from(paths).map(async pathname => {
       if (this.isSSRable(pathname)) {
         const [router, nestedModules] = this.#pageRouting.createRouter({ pathname })
-        if (router.pagePath !== '') {
+        if (router.routePath !== '') {
           let [html, data] = await this.#renderer.renderPage(router, nestedModules)
           this.#injects.get('ssr')?.forEach(transform => {
             html = transform(pathname, html)

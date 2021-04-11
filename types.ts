@@ -1,5 +1,5 @@
-import type { BufReader, BufWriter } from 'https://deno.land/std@0.90.0/io/bufio.ts'
-import type { MultipartFormData } from 'https://deno.land/std@0.90.0/mime/multipart.ts'
+import type { BufReader, BufWriter } from 'https://deno.land/std@0.92.0/io/bufio.ts'
+import type { MultipartFormData } from 'https://deno.land/std@0.92.0/mime/multipart.ts'
 import { Plugin, PluginCreator } from 'https://esm.sh/postcss@8.2.8'
 
 /**
@@ -72,14 +72,36 @@ export type Config = {
   ssr?: boolean | SSROptions
   /** `plugins` specifies some plugins for the appliaction. */
   plugins?: (LoaderPlugin | ServerPlugin)[]
-  /** `postcss` specifies the postcss plugins. */
-  postcss?: { plugins: PostCSSPlugin[] }
+  /** `css` specifies the css processing options. */
+  css?: CSSOptions
   /** `headers` appends custom headers for server requests. */
   headers?: Record<string, string>
   /** `rewrites` specifies the server rewrite map. */
   rewrites?: Record<string, string>
   /** `env` appends system env variables. */
   env?: Record<string, string>
+}
+
+/**
+ * The config for CSS resolve.
+ */
+export type CSSOptions = {
+  /** `module` enables the css module feature. */
+  modules?: false | CSSModulesOptions
+  /** `postcss` specifies the postcss plugins. */
+  postcss?: { plugins: PostCSSPlugin[] }
+}
+
+/**
+ * The options are passed on to postcss-modules.
+ */
+export type CSSModulesOptions = {
+  exportGlobals?: boolean
+  generateScopedName?: string | ((name: string, filename: string, css: string) => string)
+  globalModulePaths?: string[]
+  hashPrefix?: string
+  localsConvention?: 'camelCase' | 'camelCaseOnly' | 'dashes' | 'dashesOnly'
+  scopeBehaviour?: 'global' | 'local'
 }
 
 /**
@@ -133,7 +155,8 @@ export interface ServerResponse {
  * An interface extends the `ServerRequest` for API requests.
  */
 export interface APIRequest extends ServerRequest {
-  readonly params: URLSearchParams
+  readonly params: Record<string, string>
+  readonly query: URLSearchParams
   readonly cookies: ReadonlyMap<string, string>
   /** `readBody` reads the body to an object in bytes, string, json, or multipart form data. */
   readBody(type?: 'raw'): Promise<Uint8Array>
@@ -176,8 +199,9 @@ export type RouterURL = {
   readonly baseURL: string
   readonly locale: string
   readonly pathname: string
-  readonly pagePath: string
-  readonly params: URLSearchParams
+  readonly routePath: string
+  readonly params: Record<string, string>
+  readonly query: URLSearchParams
   push(url: string): void
   replace(url: string): void
 }

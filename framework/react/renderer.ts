@@ -1,24 +1,26 @@
-import { createElement, ComponentType, ReactElement } from 'https://esm.sh/react'
-import { renderToString } from 'https://esm.sh/react-dom/server'
+import { createElement, ComponentType, ReactElement } from 'react'
+import { renderToString } from 'react-dom/server'
 import util from '../../shared/util.ts'
 import type { FrameworkRenderResult } from '../../server/renderer.ts'
 import type { RouterURL } from '../../types.ts'
 import events from '../core/events.ts'
-import { serverStyles } from '../core/style.ts'
 import { RouterContext, SSRContext } from './context.ts'
-import { AsyncUseDenoError, E400MissingComponent, E404Page } from './error.ts'
+import { E400MissingComponent, E404Page } from './components/ErrorBoundary.ts'
+import { AsyncUseDenoError } from './hooks.ts'
 import { isLikelyReactComponent } from './helper.ts'
 import { createPageProps } from './pageprops.ts'
 
 export type RendererStorage = {
   headElements: Map<string, { type: string, props: Record<string, any> }>
-  scriptElements: Map<string, { props: Record<string, any> }>
+  scripts: Map<string, { props: Record<string, any> }>
+  inlineStyles: Map<string, string>
 }
 
 export async function render(
   url: RouterURL,
   App: ComponentType<any> | undefined,
-  nestedPageComponents: { url: string, Component?: any }[]
+  nestedPageComponents: { url: string, Component?: any }[],
+  styles: Record<string, string>
 ): Promise<FrameworkRenderResult> {
   const global = globalThis as any
   const ret: FrameworkRenderResult = {
@@ -29,26 +31,29 @@ export async function render(
   }
   const rendererStorage: RendererStorage = {
     headElements: new Map(),
-    scriptElements: new Map(),
+    scripts: new Map(),
+    inlineStyles: new Map(),
   }
-  const pagedataUrl = 'pagedata://' + url.pathname
-  const asyncCalls: Array<Promise<any>> = []
+  const qs = url.query.toString()
+  const dataUrl = 'pagedata://' + [url.pathname, qs].filter(Boolean).join('?')
+  const asyncCalls: Array<[string, number, Promise<any>]> = []
   const data: Record<string, any> = {}
+  const renderingData: Record<string, any> = {}
   const pageProps = createPageProps(nestedPageComponents)
   const defer = () => {
-    delete global['rendering-' + pagedataUrl]
-    events.removeAllListeners('useDeno-' + pagedataUrl)
+    delete global['rendering-' + dataUrl]
+    events.removeAllListeners('useDeno-' + dataUrl)
   }
 
-  // rendering data cache
-  global['rendering-' + pagedataUrl] = {}
+  // share rendering data
+  global['rendering-' + dataUrl] = renderingData
 
   // listen `useDeno-*` events to get hooks callback result.
-  events.on('useDeno-' + pagedataUrl, (id: string, v: any) => {
-    if (v instanceof Promise) {
-      asyncCalls.push(v)
+  events.on('useDeno-' + dataUrl, ({ id, value, expires }: { id: string, value: any, expires: number }) => {
+    if (value instanceof Promise) {
+      asyncCalls.push([id, expires, value])
     } else {
-      data[id] = v
+      data[id] = { value, expires }
     }
   })
 
@@ -75,7 +80,13 @@ export async function render(
   while (true) {
     try {
       if (asyncCalls.length > 0) {
-        await Promise.all(asyncCalls.splice(0, asyncCalls.length))
+        const calls = asyncCalls.splice(0, asyncCalls.length)
+        const datas = await Promise.all(calls.map(a => a[2]))
+        calls.forEach(([id, expires], i) => {
+          const value = datas[i]
+          renderingData[id] = value
+          data[id] = { value, expires }
+        })
       }
       ret.body = renderToString(createElement(
         SSRContext.Provider,
@@ -100,7 +111,7 @@ export async function render(
     }
   }
 
-  // get head child tags
+  // insert head child tags
   rendererStorage.headElements.forEach(({ type, props }) => {
     const { children, ...rest } = props
     if (type === 'title') {
@@ -123,8 +134,8 @@ export async function render(
     }
   })
 
-  // get script tags
-  rendererStorage.scriptElements.forEach(({ props }) => {
+  // insert script tags
+  rendererStorage.scripts.forEach(({ props }) => {
     const { children, dangerouslySetInnerHTML, ...attrs } = props
     if (dangerouslySetInnerHTML && util.isNEString(dangerouslySetInnerHTML.__html)) {
       ret.scripts.push({ ...attrs, innerText: dangerouslySetInnerHTML.__html })
@@ -137,14 +148,17 @@ export async function render(
     }
   })
 
-  // get styles
-  serverStyles.forEach((css, url) => {
+  // insert styles
+  Object.entries(styles).forEach(([url, css]) => {
     if (css) {
       ret.head.push(`<style type="text/css" data-module-id=${JSON.stringify(url)} ssr>${css}</style>`)
     } else if (util.isLikelyHttpURL(url)) {
       ret.head.push(`<link rel="stylesheet" href="${url}" data-module-id=${JSON.stringify(url)} ssr />`)
     }
   })
+  for (const [url, css] of rendererStorage.inlineStyles.entries()) {
+    ret.head.push(`<style type="text/css" data-module-id=${JSON.stringify(url)} ssr>${css}</style>`)
+  }
 
   defer()
   return ret

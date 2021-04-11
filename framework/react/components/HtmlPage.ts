@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 
-import React, { useEffect, useRef, RefObject, PropsWithRef, HTMLAttributes } from 'https://esm.sh/react'
-import { redirect } from '../core/redirect.ts'
+import React, { useEffect, useRef, RefObject, PropsWithRef, HTMLAttributes } from 'react'
+import { redirect } from '../../core/redirect.ts'
 
 type HTMLPageProps = PropsWithRef<HTMLAttributes<{}> & {
   ref?: RefObject<HTMLDivElement>

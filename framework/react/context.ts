@@ -1,4 +1,4 @@
-import { createContext } from 'https://esm.sh/react'
+import { createContext } from 'react'
 import type { RouterURL } from '../../types.ts'
 import { createBlankRouterURL } from '../core/routing.ts'
 import { createNamedContext } from './helper.ts'
@@ -8,5 +8,6 @@ export const RouterContext = createNamedContext<RouterURL>(createBlankRouterURL(
 
 export const SSRContext = createContext<RendererStorage>({
   headElements: new Map(),
-  scriptElements: new Map(),
+  scripts: new Map(),
+  inlineStyles: new Map(),
 })

@@ -1,5 +1,5 @@
-import { join } from 'https://deno.land/std@0.90.0/path/mod.ts'
-import { serve } from 'https://deno.land/std@0.90.0/http/server.ts'
+import { join } from 'https://deno.land/std@0.92.0/path/mod.ts'
+import { serve } from 'https://deno.land/std@0.92.0/http/server.ts'
 import log from '../shared/log.ts'
 import { Request } from './api.ts'
 import { getContentType } from './mime.ts'
@@ -17,7 +17,7 @@ export async function localProxy(cwd: string, port: number) {
   log.debug(`Proxy https://deno.land/x/aleph on http://localhost:${port}`)
   for await (const r of s) {
     const url = new URL('http://localhost' + r.url)
-    const resp = new Request(r, url.searchParams)
+    const resp = new Request(r, {}, url.searchParams)
     const filepath = join(cwd, url.pathname)
     try {
       const info = await Deno.lstat(filepath)

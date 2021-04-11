@@ -1,13 +1,20 @@
-import { join } from 'https://deno.land/std@0.90.0/path/mod.ts'
+import { basename, join } from 'https://deno.land/std@0.92.0/path/mod.ts'
+import { bold } from 'https://deno.land/std@0.92.0/fmt/colors.ts'
 import type { ImportMap, ReactResolve } from '../compiler/mod.ts'
 import { defaultReactVersion } from '../shared/constants.ts'
 import { existsFileSync, existsDirSync } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
-import type { Config, PostCSSPlugin } from '../types.ts'
+import type { Config, CSSOptions, PostCSSPlugin } from '../types.ts'
+import { VERSION } from '../version.ts'
 import { getAlephPkgUri, reLocaleID } from './helper.ts'
 
-export const defaultConfig: Readonly<Required<Config> & { react: ReactResolve }> = {
+export interface RequiredConfig extends Required<Omit<Config, 'css'>> {
+  react: ReactResolve,
+  css: Required<CSSOptions>
+}
+
+export const defaultConfig: Readonly<RequiredConfig> = {
   framework: 'react',
   buildTarget: 'es2015',
   baseUrl: '/',
@@ -18,12 +25,15 @@ export const defaultConfig: Readonly<Required<Config> & { react: ReactResolve }>
   rewrites: {},
   ssr: {},
   plugins: [],
-  postcss: { plugins: ['autoprefixer'] },
+  css: {
+    modules: false,
+    postcss: { plugins: ['autoprefixer'] },
+  },
   headers: {},
   env: {},
   react: {
     version: defaultReactVersion,
-    esmShBuildVersion: 34,
+    esmShBuildVersion: 39,
   }
 }
 
@@ -64,7 +74,7 @@ export async function loadConfig(workingDir: string): Promise<Config> {
     ssr,
     rewrites,
     plugins,
-    postcss,
+    css,
     headers,
     env,
   } = data
@@ -115,22 +125,22 @@ export async function loadConfig(workingDir: string): Promise<Config> {
   if (util.isNEArray(plugins)) {
     config.plugins = plugins
   }
-  if (isPostcssConfig(postcss)) {
-    config.postcss = postcss
-  } else {
-    config.postcss = await loadPostCSSConfig(workingDir)
+  if (util.isPlainObject(css)) {
+    config.css = {
+      modules: util.isPlainObject(css.modules) ? css.modules : false,
+      postcss: isPostcssConfig(css.postcss) ? css.postcss : defaultConfig.css.postcss
+    }
   }
 
   return config
 }
 
-
-
-/** load import maps from `import_map.json` */
-export async function loadImportMap(workingDir: string): Promise<ImportMap> {
+/** load and upgrade the import maps from `import_map.json` */
+export async function loadAndUpgradeImportMap(workingDir: string): Promise<ImportMap> {
   const importMap: ImportMap = { imports: {}, scopes: {} }
+  let importMapFile = ''
   for (const filename of Array.from(['import_map', 'import-map', 'importmap']).map(name => `${name}.json`)) {
-    const importMapFile = join(workingDir, filename)
+    importMapFile = join(workingDir, filename)
     if (existsFileSync(importMapFile)) {
       const data = JSON.parse(await Deno.readTextFile(importMapFile))
       const imports: Record<string, string> = toPlainStringRecord(data.imports)
@@ -145,44 +155,46 @@ export async function loadImportMap(workingDir: string): Promise<ImportMap> {
     }
   }
 
-  // update import map for alephjs dev env
-  const DEV_PORT = Deno.env.get('ALEPH_DEV_PORT')
-  if (DEV_PORT) {
-    const alephPkgUri = getAlephPkgUri()
-    const imports = {
-      'framework': `${alephPkgUri}/framework/core/mod.ts`,
-      'framework/react': `${alephPkgUri}/framework/react/mod.ts`,
-      'react': `https://esm.sh/react@${defaultReactVersion}`,
-      'react-dom': `https://esm.sh/react-dom@${defaultReactVersion}`,
+  const upgrade: { name: string, url: string }[] = []
+  for (const [name, url] of Object.entries(importMap.imports)) {
+    if (url.startsWith('https://deno.land/x/aleph')) {
+      const a = url.split('aleph')[1].split('/')
+      const version = util.trimPrefix(a.shift()!, '@v')
+      if (version !== VERSION && a.length > 0) {
+        upgrade.push({ name, url: `https://deno.land/x/aleph@v${VERSION}/${a.join('/')}` })
+      }
     }
-    Object.assign(importMap.imports, imports)
+  }
+
+  if (upgrade.length > 0) {
+    log.info(`upgraded ${basename(importMapFile)} to ${bold(VERSION)}`)
+    upgrade.forEach(({ name, url }) => {
+      importMap.imports[name] = url
+    })
+    await Deno.writeTextFile(importMapFile, JSON.stringify(importMap, undefined, 2))
+  }
+
+  const v = Deno.env.get('ALEPH_DEV')
+  const alephPkgUri = getAlephPkgUri()
+  const defaultImports: Record<string, string> = {
+    'aleph/': `${alephPkgUri}/`,
+    'framework': `${alephPkgUri}/framework/core/mod.ts`,
+    'framework/react': `${alephPkgUri}/framework/react/mod.ts`,
+    'react': `https://esm.sh/react@${defaultReactVersion}`,
+    'react-dom': `https://esm.sh/react-dom@${defaultReactVersion}`,
+    'react-dom/server': `https://esm.sh/react-dom@${defaultReactVersion}/server`,
+  }
+  // in aleph dev mode, use default imports instead of app settings
+  if (v !== undefined) {
+    Object.assign(importMap.imports, defaultImports)
+  } else {
+    importMap.imports = Object.assign(defaultImports, importMap.imports,)
   }
 
   return importMap
 }
 
-async function loadPostCSSConfig(workingDir: string): Promise<{ plugins: PostCSSPlugin[] }> {
-  for (const name of Array.from(['ts', 'js', 'json']).map(ext => `postcss.config.${ext}`)) {
-    const p = join(workingDir, name)
-    if (existsFileSync(p)) {
-      let config: any = null
-      if (name.endsWith('.json')) {
-        config = JSON.parse(await Deno.readTextFile(p))
-      } else {
-        const mod = await import('file://' + p)
-        config = mod.default
-        if (util.isFunction(config)) {
-          config = await config()
-        }
-      }
-      if (isPostcssConfig(config)) {
-        return config
-      }
-    }
-  }
 
-  return { plugins: ['autoprefixer'] }
-}
 
 function isFramework(v: any): v is 'react' {
   switch (v) {
