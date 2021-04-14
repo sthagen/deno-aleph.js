@@ -1,24 +1,23 @@
+import { Status } from 'https://deno.land/std@0.92.0/http/http_status.ts'
 import type { BufReader, BufWriter } from 'https://deno.land/std@0.92.0/io/bufio.ts'
 import type { MultipartFormData } from 'https://deno.land/std@0.92.0/mime/multipart.ts'
 import { MultipartReader } from 'https://deno.land/std@0.92.0/mime/multipart.ts'
 import log from '../shared/log.ts'
 import type { APIRequest, ServerRequest, ServerResponse } from '../types.ts'
+import compress from './compress.ts'
 
-let brotli: ((data: Uint8Array) => Uint8Array) | null = null
-let gzip: ((data: Uint8Array) => Uint8Array) | null = null
+type Response = {
+  status: number
+  headers: Headers
+  done: boolean
+}
 
 export class Request implements APIRequest {
   #req: ServerRequest
   #params: Record<string, string>
   #query: URLSearchParams
   #cookies: ReadonlyMap<string, string>
-  #resp = {
-    status: 200,
-    headers: new Headers({
-      Server: 'Aleph.js',
-    }),
-    done: false
-  }
+  #resp: Response
 
   constructor(req: ServerRequest, params: Record<string, string>, query: URLSearchParams) {
     this.#req = req
@@ -26,12 +25,19 @@ export class Request implements APIRequest {
     this.#query = query
     const cookies = new Map()
     this.headers.get('cookie')?.split(';').forEach(cookie => {
-      const p = cookie.trim().split('=')
+      const p = cookie.split('=')
       if (p.length >= 2) {
-        cookies.set(p.shift()!.trim(), decodeURI(p.join('=')))
+        cookies.set(p.shift()!, decodeURI(p.join('=')))
       }
     })
     this.#cookies = cookies
+    this.#resp = {
+      status: 200,
+      headers: new Headers({
+        Server: 'Aleph.js',
+      }),
+      done: false
+    }
   }
 
   get url(): string {
@@ -40,6 +46,10 @@ export class Request implements APIRequest {
 
   get method(): string {
     return this.#req.method
+  }
+
+  get hostname(): string {
+    return (this.#req.conn.remoteAddr as Deno.NetAddr).hostname
   }
 
   get headers(): Headers {
@@ -126,6 +136,16 @@ export class Request implements APIRequest {
     return this
   }
 
+  redirect(url: string, status: Status = Status.Found): this {
+    // "back" is an alias for the referrer.
+    if (url == "back") {
+      url = this.#resp.headers.get("Referrer") || "/"
+    }
+    this.#resp.status = status
+    this.#resp.headers.set("Location", encodeURI(url))
+    return this
+  }
+
   async send(data?: string | Uint8Array | ArrayBuffer, contentType?: string): Promise<void> {
     if (this.#resp.done) {
       log.warn('ServerRequest: repeat respond calls')
@@ -148,39 +168,12 @@ export class Request implements APIRequest {
       contentType = 'text/plain; charset=utf-8'
       this.#resp.headers.set('Content-Type', contentType)
     }
-    if (Deno.env.get('ALEPH_BUILD_MODE') !== 'development') {
-      let shouldCompress = false
-      if (contentType) {
-        if (contentType.startsWith('text/')) {
-          shouldCompress = true
-        } else if (/^application\/(javascript|typecript|wasm|json|xml)/i.test(contentType)) {
-          shouldCompress = true
-        } else if (/^image\/svg\+xml/i.test(contentType)) {
-          shouldCompress = true
-        }
-      }
-      if (shouldCompress && body.length > 1024) {
-        const ae = this.headers.get('accept-encoding') || ''
-        if (ae.includes('br')) {
-          this.#resp.headers.set('Vary', 'Origin')
-          this.#resp.headers.set('Content-Encoding', 'br')
-          if (brotli === null) {
-            const { compress } = await import('https://deno.land/x/brotli@v0.1.4/mod.ts')
-            brotli = compress
-          }
-          body = brotli(body)
-        } else if (ae.includes('gzip')) {
-          this.#resp.headers.set('Vary', 'Origin')
-          this.#resp.headers.set('Content-Encoding', 'gzip')
-          if (gzip === null) {
-            const denoflate = await import('https://deno.land/x/denoflate@1.1/mod.ts')
-            gzip = (data: Uint8Array) => denoflate.gzip(data, undefined)
-          }
-          body = gzip(body)
-        }
-      }
+    if (contentType) {
+      body = compress.apply(this.#req, this.#resp, contentType, body)
     }
-    this.#resp.headers.set('Date', (new Date).toUTCString())
+    if (!this.#resp.headers.has('Date')) {
+      this.#resp.headers.set('Date', (new Date).toUTCString())
+    }
     this.#resp.done = true
     try {
       await this.respond({
