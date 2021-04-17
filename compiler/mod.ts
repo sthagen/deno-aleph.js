@@ -1,5 +1,5 @@
-import { join } from 'https://deno.land/std@0.92.0/path/mod.ts'
-import { ensureDir } from 'https://deno.land/std@0.92.0/fs/ensure_dir.ts'
+import { join } from 'https://deno.land/std@0.93.0/path/mod.ts'
+import { ensureDir } from 'https://deno.land/std@0.93.0/fs/ensure_dir.ts'
 import { existsFileSync } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import { VERSION } from '../version.ts'
@@ -27,7 +27,6 @@ export type ReactResolve = {
 
 export type SWCOptions = {
   sourceType?: SourceType
-  target?: 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020'
   jsxFactory?: string
   jsxFragmentFactory?: string
 }
@@ -39,8 +38,6 @@ export type TransformOptions = {
   swcOptions?: SWCOptions
   sourceMap?: boolean
   isDev?: boolean
-  transpileOnly?: boolean
-  resolveStarExports?: boolean
   bundleMode?: boolean
   bundleExternal?: string[]
   inlineStylePreprocess?(key: string, type: string, tpl: string): Promise<string>
